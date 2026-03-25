@@ -59,3 +59,4 @@ Desktop.ini
 # Python cache (in case helper scripts are added)
 __pycache__/
 *.pyc
+/DWIN_SET/
