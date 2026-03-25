@@ -57,14 +57,28 @@ static void tca_handle_pn532(uint8_t curr_inputs)
     }
 }
 
-static void tca_handle_ds3231(uint8_t curr_inputs, uint8_t mixed_other, uint32_t now)
+/*
+ * tca_handle_ds3231 — обработка 1Hz SQW от DS3231M через TCA P0.
+ *
+ * Логика dedup/latch:
+ *   1. P0 == LOW (активная фаза SQW):
+ *      - Если s_ds_low_seen == 0 → первый фронт LOW в этом цикле:
+ *        вызываем service_time_sync_on_tick() + runtime_config_apply,
+ *        ставим s_ds_low_seen = 1 и запоминаем время.
+ *      - Повторные LOW-вызовы (bounce TCA IRQ) игнорируются (dedup).
+ *   2. P0 == HIGH (SQW вернулся в HIGH):
+ *      - Сбрасываем s_ds_low_seen после TCA_DS_LOW_LATCH_WINDOW_MS,
+ *        чтобы быть готовым к следующему фронту LOW (через ~500-600ms).
+ *
+ * ВАЖНО: tick вызывается безусловно при первом LOW, даже если
+ * одновременно изменились P2 (кнопка) или P3 (PN532).
+ * Ранее mixed_other != 0 блокировал tick — это приводило к потере
+ * секундного импульса при совпадении событий.
+ */
+static void tca_handle_ds3231(uint8_t curr_inputs, uint32_t now)
 {
     if ((curr_inputs & TCA_P0_DS3231_1HZ) == 0U) {
-        if (mixed_other != 0U) {
-            s_ds_low_seen = 1U;
-            s_ds_low_latched_at = now;
-            return;
-        }
+        /* P0 LOW — активная фаза SQW 1Hz */
         if (s_ds_low_seen == 0U) {
             uint8_t *iram = app_i2c_slave_get_ram();
             (void)service_time_sync_on_tick(iram);
@@ -73,10 +87,9 @@ static void tca_handle_ds3231(uint8_t curr_inputs, uint8_t mixed_other, uint32_t
             s_ds_low_latched_at = now;
         }
     } else {
+        /* P0 HIGH — SQW вернулся; сбросить latch после окна */
         if ((s_ds_low_seen != 0U) && ((now - s_ds_low_latched_at) >= TCA_DS_LOW_LATCH_WINDOW_MS)) {
             s_ds_low_seen = 0U;
-        } else if (s_ds_low_seen == 0U) {
-            s_ds_low_latched_at = now;
         }
     }
 }
@@ -172,11 +185,10 @@ void service_tca6408_process_irq_event(void)
 
     {
         uint8_t changed = (uint8_t)((s_prev_inputs ^ curr_inputs) & TCA_USED_INPUTS_MASK);
-        uint8_t mixed_other = (uint8_t)(changed & (TCA_P2_EXT_BUTTON | TCA_P3_PN532_IRQ));
 
         tca_handle_pn532(curr_inputs);
         tca_handle_button(changed, curr_inputs, now);
-        tca_handle_ds3231(curr_inputs, mixed_other, now);
+        tca_handle_ds3231(curr_inputs, now);
     }
 
     s_prev_inputs = curr_inputs;

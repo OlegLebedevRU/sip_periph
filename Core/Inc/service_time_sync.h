@@ -2,7 +2,20 @@
  * service_time_sync.h
  *
  * Сервис синхронизации времени: DS3231M RTC + BCD-утилиты.
- * Источник тика: TCA P0 (DS3231 1Hz SQW) → service_tca6408.
+ *
+ * Источник тика:
+ *   DS3231M SQW 1Hz → TCA6408A P0 (LOW) → ~INT → PC13 EXTI →
+ *   myQueueTCA6408Handle → service_tca6408 → tca_handle_ds3231() →
+ *   service_time_sync_on_tick(ram)
+ *
+ * service_time_sync_on_tick():
+ *   - читает 7 BCD байт из DS3231 по I2C
+ *   - копирует в ram[0x60..0x66]
+ *   - ставит PACKET_TIME в myQueueToMasterHandle
+ *
+ * service_time_sync_from_master():
+ *   - вызывается из app_i2c_slave при записи в 0x88
+ *   - сравнивает master-время с RTC, при drift > 5s перезаписывает RTC
  */
 
 #ifndef INC_SERVICE_TIME_SYNC_H_

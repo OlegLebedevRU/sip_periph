@@ -5,8 +5,41 @@
  * Все пины настроены как INPUT (reg 0x03 = 0xFF).
  * IRQ от TCA → STM32 EXT_INT (PC13, EXTI15_10, falling edge).
  *
- * Быстродействие: высокое RT не требуется — события обрабатываются
- * штатной FreeRTOS-очередью myQueueTCA6408Handle.
+ * ======================================================================
+ * EVENT FLOW: DS3231 1Hz SQW → TIME packet to master
+ * ======================================================================
+ *
+ *  DS3231M SQW pin (1Hz square wave, ~500ms LOW / ~500ms HIGH)
+ *        │
+ *        ▼
+ *  TCA6408A P0 input ── goes LOW ──► ~INT output asserts (falling edge)
+ *        │
+ *        ▼
+ *  STM32 PC13 (EXT_INT_Pin, GPIO_PIN_13) ── EXTI15_10_IRQn
+ *        │
+ *        ▼
+ *  HAL_GPIO_EXTI_Callback()                          [main.c]
+ *    └─► app_irq_router_exti_callback(GPIO_PIN_13)   [app_irq_router.c]
+ *          └─► xQueueSendFromISR(myQueueTCA6408Handle, 1)
+ *        │
+ *        ▼
+ *  StartTasktca6408a() ── xQueueReceive(...)          [service_tca6408.c]
+ *    └─► service_tca6408_process_irq_event()
+ *          ├── I2C read TCA reg[0x00] → curr_inputs
+ *          ├── tca_handle_pn532(curr_inputs)          — P3 check
+ *          ├── tca_handle_button(changed, curr, now)  — P2 debounce
+ *          └── tca_handle_ds3231(curr_inputs, now)    — P0 1Hz tick
+ *                │
+ *                ▼  (first P0 LOW in cycle, s_ds_low_seen == 0)
+ *          service_time_sync_on_tick(ram)              [service_time_sync.c]
+ *            ├── ds3231_read_time() — I2C read 7 BCD bytes
+ *            ├── memcpy → ram[0x60..0x66]
+ *            └── xQueueSend(myQueueToMasterHandle, PACKET_TIME)
+ *
+ *  Dedup: s_ds_low_seen prevents multiple ticks per SQW cycle.
+ *         Reset after P0 returns HIGH + TCA_DS_LOW_LATCH_WINDOW_MS (400ms).
+ *
+ * ======================================================================
  */
 
 #ifndef INC_TCA6408A_MAP_H_
