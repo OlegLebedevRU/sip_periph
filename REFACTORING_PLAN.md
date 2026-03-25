@@ -800,6 +800,29 @@ void StartTaskOLED(void const *argument);
 
 ---
 
+### ШАГ 13 — Очистка мёртвого кода в `main.c`
+
+**Цель:** удалить переменные, функции, прототипы, дефайны и закомментированный код,
+которые больше не имеют потребителей после завершения шагов 1–12.
+
+**Удалено:**
+- Dead-переменные: `Transfer_Direction`, `Xfer_Complete`, `key_buf_offset`,
+  `slaveRxData`, `rxbuf[128]` — ноль читателей
+- Legacy-глобалы: `rele1_act_sec`, `rele1_tm_before_100ms`, `rele_mode_flag`,
+  `matrix_keyb_freeze`, `reader_interval_sec` — все модули используют `runtime_config_get()`
+- `apply_runtime_settings_from_ram()` — единственный потребитель удалённых глобалов
+- Dead-прототип `wiegand_bit_event` — без тела, без вызовов
+- Дублированные `#define TIME_SYNC_MIN_YEAR/MONTH/DAY` — уже в `main.h`
+- Закомментированный код в `StartDefaultTask` и post-scheduler `while(1)` loop
+- Неиспользуемые `#include`: `stdio.h`, `stdlib.h`, `stdbool.h`, `event_groups.h`, `tca6408a_map.h`
+
+**Контрольные точки:**
+- [x] `grep` по всем `Core/Src/*.c` подтверждает ноль потребителей удалённых символов
+- [x] Компиляция чистая (0 ошибок)
+- [x] Ни один поток событий не затронут
+
+---
+
 ## 4. Функциональный тест после рефакторинга
 
 После завершения всех шагов проверить каждый поток:
@@ -899,3 +922,4 @@ runtime_config_t обновлён → следующий relay/button запро
 | 10. Валидация компиляции | ✅ Выполнена | изменённые файлы | 2026-03-22 |
 | 11. service_pn532_task | ✅ Выполнен | service_pn532_task.h/.c, main.c | 2026-03-25 |
 | 12. service_oled_task | ✅ Выполнен | service_oled_task.h/.c, main.c | 2026-03-25 |
+| 13. Очистка мёртвого кода | ✅ Выполнен | main.c | 2026-03-25 |

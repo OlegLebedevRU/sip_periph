@@ -23,13 +23,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
 #include "FreeRTOS.h"
-#include "event_groups.h"
-#include "tca6408a_map.h"
 #include "service_runtime_config.h"
 #include "app_irq_router.h"
 #include "app_uart_dwin.h"
@@ -44,16 +39,10 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-__IO uint32_t Transfer_Direction = 0;
-__IO uint32_t Xfer_Complete = 0;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
-#define TIME_SYNC_MIN_YEAR        26U
-#define TIME_SYNC_MIN_MONTH       3U
-#define TIME_SYNC_MIN_DAY         19U
 
 /* USER CODE END PD */
 
@@ -105,21 +94,6 @@ osTimerId myTimerBuzzerOffHandle;
 osMutexId i2c2_MutexHandle;
 osSemaphoreId pn532SemaphoreHandle;
 /* USER CODE BEGIN PV */
-
-/* APP Parameters — перенесены в service_runtime_config.h (runtime_config_t).
- * Legacy-глобалы сохранены временно только как кэш для оставшихся задач main.c. */
-__IO uint8_t rele1_act_sec, rele1_tm_before_100ms;
-__IO uint8_t rele_mode_flag;
-__IO uint8_t matrix_keyb_freeze;
-__IO uint8_t reader_interval_sec;
-
-/* PN532 buffers moved to service_pn532_task.c (шаг 10) */
-uint8_t slaveRxData;
-uint8_t rxbuf[128] = { };
-
-__IO uint8_t key_buf_offset = 0;
-
-static void apply_runtime_settings_from_ram(void);
 /* USER CODE END PV */
 
 /* USER CODE BEGIN TCA6408A_HELPERS */
@@ -156,22 +130,10 @@ extern void cb_TmReleAct(void const * argument);
 extern void cb_Tm_buzzerOff(void const * argument);
 
 /* USER CODE BEGIN PFP */
-void wiegand_bit_event(uint16_t GPIO_Pin);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-static void apply_runtime_settings_from_ram(void) {
-    const runtime_config_t *cfg = runtime_config_get();
-    if (cfg != NULL) {
-        rele1_act_sec         = cfg->relay_act_sec;
-        rele1_tm_before_100ms = cfg->relay_before_100ms;
-        rele_mode_flag        = cfg->relay_pulse_en;
-        matrix_keyb_freeze    = cfg->matrix_freeze_sec;
-        reader_interval_sec   = cfg->reader_interval_sec;
-    }
-}
-
 void lock_i2c2(uint32_t milisec){
 	osMutexWait(i2c2_MutexHandle, milisec);
 }
@@ -251,10 +213,7 @@ int main(void)
   MX_TIM11_Init();
   /* USER CODE BEGIN 2 */
 	service_pn532_init();
-	key_buf_offset = 0;
 	memset(app_i2c_slave_get_ram(), 0, 256);
-
-	//uint8_t *rele_mode = &rele_mode_flag;
   /* USER CODE END 2 */
 
   /* Create the mutex(es) */
@@ -426,31 +385,8 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-//  HAL_I2C_EnableListen_IT(&hi2c1);
-
-	//tca6408a_event_group = xEventGroupCreate();
-//  /*Configure GPIO pins : PB6 PB7 PB8 PB9 back to EXTI*/
-//   GPIO_InitStructPrivate.Pin = ROW1_Pin|ROW2_Pin;
-//   GPIO_InitStructPrivate.Mode = GPIO_MODE_IT_RISING;
-//   GPIO_InitStructPrivate.Pull = GPIO_PULLDOWN;
-//   HAL_GPIO_Init(GPIOA, &GPIO_InitStructPrivate);
-//   /*Configure GPIO pins : PB6 PB7 PB8 PB9 back to EXTI*/
-//   GPIO_InitStructPrivate.Pin = ROW3_Pin|ROW4_Pin;
-//   HAL_GPIO_Init(GPIOB, &GPIO_InitStructPrivate);
-	osDelay(1);
-//	 HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
-	//uint8_t value = 0;  // the value for the duty cycle
 	while (1) {
-
-		// while (value<255)
-		//     {
-		//  __HAL_TIM_MOE_ENABLE(&htim1);
-//	      htim1.Instance->CCR1 = value;// value;  // vary the duty cycle
-		//      value += 20;  // increase the duty cycle by 20
-		HAL_Delay(500);  // wait for 500 ms
-		//     }
-
-//	     value = 0;   // reset the value
+		HAL_Delay(500);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -854,16 +790,12 @@ void StartDefaultTask(void const * argument)
   	app_i2c_slave_init();
   	/* Инициализировать дефолтные значения конфигурации через сервис */
   	runtime_config_init_defaults(app_i2c_slave_get_ram());
-  	apply_runtime_settings_from_ram();  /* синхронизировать legacy-глобалы */
-  //	uint8_t dt[]={ 0x00,0x00,0x50,0x13,0x20,0x19,0x02,0x26};
   	lock_i2c2(100);
-  //	HAL_I2C_Master_Transmit(&hi2c2, 0xD0,dt,8,5);
   	uint8_t cntrl = 0;
   	uint8_t regad = DS3231_REG_CONTROL;
   	HAL_I2C_Mem_Read(&hi2c2, DS3231_I2C_ADDR, (uint16_t)regad, I2C_MEMADD_SIZE_8BIT, &cntrl, 1, 100);
   	cntrl = cntrl & (~0x04);
   	uint8_t p[2] = {DS3231_REG_CONTROL, cntrl};
-  //	HAL_I2C_Mem_Write(&hi2c2,0xD0, (uint16_t)regad, I2C_MEMADD_SIZE_8BIT, &cntrl, 1, 100);
   	HAL_I2C_Master_Transmit(&hi2c2, DS3231_I2C_ADDR, p, 2, 5);
   	unlock_i2c2();
 	/* Infinite loop */
