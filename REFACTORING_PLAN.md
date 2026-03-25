@@ -823,6 +823,30 @@ void StartTaskOLED(void const *argument);
 
 ---
 
+### ШАГ 14 — Вынос `StartTasktca6408a` и DS3231 init
+
+**Цель:** убрать последнее пользовательское тело задачи из `main.c` и убрать прямую
+работу с DS3231 по I2C из `StartDefaultTask`.
+
+**Что перенесено:**
+- `StartTasktca6408a` (~15 строк) → `service_tca6408.c` (прототип в `.h`)
+- DS3231 control register init (read INTCN, clear bit2, write back) →
+  новая функция `service_time_sync_init()` в `service_time_sync.c/.h`
+- `StartDefaultTask` теперь вызывает `service_time_sync_init()` вместо inline I2C кода
+
+**Удалены из `main.c`:**
+- Тело `StartTasktca6408a` — заменено на `extern` прототип
+- Inline DS3231 I2C код из `StartDefaultTask` (6 строк)
+- Неиспользуемые `#include`: `service_tca6408.h`, `service_oled_task.h`
+
+**Контрольные точки:**
+- [x] `StartTasktca6408a` живёт в `service_tca6408.c`, прототип в `.h`
+- [x] `service_time_sync_init()` — инициализирует DS3231 SQW 1Hz
+- [x] `main.c` не содержит прямых обращений к DS3231 регистрам
+- [x] Компиляция чистая (0 ошибок)
+
+---
+
 ## 4. Функциональный тест после рефакторинга
 
 После завершения всех шагов проверить каждый поток:
@@ -923,3 +947,4 @@ runtime_config_t обновлён → следующий relay/button запро
 | 11. service_pn532_task | ✅ Выполнен | service_pn532_task.h/.c, main.c | 2026-03-25 |
 | 12. service_oled_task | ✅ Выполнен | service_oled_task.h/.c, main.c | 2026-03-25 |
 | 13. Очистка мёртвого кода | ✅ Выполнен | main.c | 2026-03-25 |
+| 14. TCA task + DS3231 init | ✅ Выполнен | service_tca6408.h/.c, service_time_sync.h/.c, main.c | 2026-03-25 |

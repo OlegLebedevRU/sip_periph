@@ -24,6 +24,9 @@ void service_tca6408_init(void);
 void service_tca6408_post_bootstrap(void);
 void service_tca6408_process_irq_event(void);
 
+/* FreeRTOS task body — registered as osThreadDef(myTask_tca6408a, ...) in main.c */
+void StartTasktca6408a(void const *argument);
+
 HAL_StatusTypeDef service_tca6408_write_reg(uint8_t reg_addr, uint8_t data);
 HAL_StatusTypeDef service_tca6408_read_reg(uint8_t reg_addr, uint8_t *data);
 

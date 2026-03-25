@@ -229,3 +229,19 @@ uint8_t service_tca6408_get_last_inputs(void)
 {
     return s_last_inputs;
 }
+
+/* ---- FreeRTOS task body (moved from main.c, step 14) ------------------- */
+
+void StartTasktca6408a(void const *argument)
+{
+    service_tca6408_init();
+    service_tca6408_post_bootstrap();
+
+    for (;;) {
+        uint16_t tca;
+        xQueueReceive(myQueueTCA6408Handle, &tca, osWaitForever);
+        (void)tca;
+        service_tca6408_process_irq_event();
+        osDelay(1);
+    }
+}

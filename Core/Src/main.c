@@ -32,9 +32,7 @@
 #include "service_relay_actuator.h"
 #include "service_matrix_kbd.h"
 #include "app_i2c_slave.h"
-#include "service_tca6408.h"
 #include "service_pn532_task.h"
-#include "service_oled_task.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -116,7 +114,7 @@ extern void StartTaskOLED(void const * argument);
 extern void StartTaskWiegand(void const * argument);
 extern void StartTaskHmi(void const * argument);
 extern void StartTaskHmiMsg(void const * argument);
-void StartTasktca6408a(void const * argument);
+extern void StartTasktca6408a(void const * argument);
 extern void StartTaskI2cGuard(void const * argument);
 extern void cb_keyTimer(void const * argument);
 void cb_OneSec(void const * argument);
@@ -790,14 +788,7 @@ void StartDefaultTask(void const * argument)
   	app_i2c_slave_init();
   	/* Инициализировать дефолтные значения конфигурации через сервис */
   	runtime_config_init_defaults(app_i2c_slave_get_ram());
-  	lock_i2c2(100);
-  	uint8_t cntrl = 0;
-  	uint8_t regad = DS3231_REG_CONTROL;
-  	HAL_I2C_Mem_Read(&hi2c2, DS3231_I2C_ADDR, (uint16_t)regad, I2C_MEMADD_SIZE_8BIT, &cntrl, 1, 100);
-  	cntrl = cntrl & (~0x04);
-  	uint8_t p[2] = {DS3231_REG_CONTROL, cntrl};
-  	HAL_I2C_Master_Transmit(&hi2c2, DS3231_I2C_ADDR, p, 2, 5);
-  	unlock_i2c2();
+  	service_time_sync_init();
 	/* Infinite loop */
 	for (;;) {
 		osDelay(100);
@@ -830,31 +821,10 @@ void StartDefaultTask(void const * argument)
 * @brief Function implementing the myTask_tca6408a thread.
 * @param argument: Not used
 * @retval None
-*
-* DS3231M_timer
-* SWQ - This multifunction
-*pin is determined by the state of the INTCN bit in the Control register (0Eh). When INTCN is set to
-*logic 0, this pin outputs a 1Hz square wave. When INTCN is set to logic 1, a match between the
-*timekeeping registers and either of the alarm registers activates the INT/SQW pin (if the alarm is
-*enabled). Because the INTCN bit is set to logic 1 when power is first applied, the pin defaults to
-*an interrupt output with alarms disabled.
 */
 /* USER CODE END Header_StartTasktca6408a */
-void StartTasktca6408a(void const * argument)
-{
-  /* USER CODE BEGIN StartTasktca6408a */
-    service_tca6408_init();
-    service_tca6408_post_bootstrap();
 
-    for(;;) {
-        uint16_t tca;
-        xQueueReceive(myQueueTCA6408Handle, &tca, osWaitForever);
-        (void)tca;
-        service_tca6408_process_irq_event();
-        osDelay(1);
-    }
-  /* USER CODE END StartTasktca6408a */
-}
+/* StartTasktca6408a moved to service_tca6408.c (шаг 14 рефакторинга) */
 
 /* cb_OneSec function */
 void cb_OneSec(void const * argument)
