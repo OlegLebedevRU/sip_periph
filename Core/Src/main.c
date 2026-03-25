@@ -42,6 +42,7 @@
 #include "service_matrix_kbd.h"
 #include "app_i2c_slave.h"
 #include "service_tca6408.h"
+#include "app_bootstrap.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -56,6 +57,10 @@ __IO uint32_t Xfer_Complete = 0;
 #define TIME_SYNC_MIN_YEAR        26U
 #define TIME_SYNC_MIN_MONTH       3U
 #define TIME_SYNC_MIN_DAY         19U
+#define PN532_UID_DEDUP_WINDOW_MS 5000U
+#define PN532_UID_OFFSET          13U
+#define PN532_UID_LEN             8U
+#define PN532_MIN_FRAME_LEN       (PN532_UID_OFFSET + PN532_UID_LEN)
 
 /* USER CODE END PD */
 
@@ -123,9 +128,13 @@ pn532_t pn532;
 uint8_t rxbuf[128] = { };
 
 static int pn_i2c_fault = 1;
+static uint8_t s_last_pn532_uid[PN532_UID_LEN] = {0};
+static uint32_t s_last_pn532_uid_tick = 0U;
 __IO uint8_t key_buf_offset = 0;
 
 static void apply_runtime_settings_from_ram(void);
+static uint8_t pn532_payload_has_uid(const uint8_t *buf, size_t len);
+static uint8_t pn532_uid_is_duplicate(const uint8_t *uid_buf, uint32_t now);
 /* USER CODE END PV */
 
 /* USER CODE BEGIN TCA6408A_HELPERS */
@@ -176,6 +185,43 @@ static void apply_runtime_settings_from_ram(void) {
         matrix_keyb_freeze    = cfg->matrix_freeze_sec;
         reader_interval_sec   = cfg->reader_interval_sec;
     }
+}
+
+static uint8_t pn532_payload_has_uid(const uint8_t *buf, size_t len)
+{
+    size_t i;
+
+    if ((buf == NULL) || (len < PN532_MIN_FRAME_LEN)) {
+        return 0U;
+    }
+    if ((buf[6] != 0xD5U) || (buf[7] != 0x4BU)) {
+        return 0U;
+    }
+    if ((buf[8] == 0x00U) || (buf[12] == 0x00U)) {
+        return 0U;
+    }
+    for (i = 0; i < PN532_UID_LEN; i++) {
+        if (buf[PN532_UID_OFFSET + i] != 0x00U) {
+            return 1U;
+        }
+    }
+    return 0U;
+}
+
+static uint8_t pn532_uid_is_duplicate(const uint8_t *uid_buf, uint32_t now)
+{
+    if (uid_buf == NULL) {
+        return 0U;
+    }
+    if ((s_last_pn532_uid_tick != 0U)
+        && (memcmp(s_last_pn532_uid, uid_buf, PN532_UID_LEN) == 0)
+        && ((now - s_last_pn532_uid_tick) < PN532_UID_DEDUP_WINDOW_MS)) {
+        return 1U;
+    }
+
+    memcpy(s_last_pn532_uid, uid_buf, PN532_UID_LEN);
+    s_last_pn532_uid_tick = now;
+    return 0U;
 }
 
 void lock_i2c2(uint32_t milisec){
@@ -258,7 +304,15 @@ int main(void)
   /* USER CODE BEGIN 2 */
 	memset(&pn532, 0, sizeof(pn532_t));
 	key_buf_offset = 0;
-	memset(app_i2c_slave_get_ram(), 0, 256);
+	{
+		uint8_t *i2c_ram = app_context_i2c_ram(app_context_get());
+		if (i2c_ram == NULL) {
+			i2c_ram = app_i2c_slave_get_ram();
+		}
+		if (i2c_ram != NULL) {
+			memset(i2c_ram, 0, 256);
+		}
+	}
 
 	//uint8_t *rele_mode = &rele_mode_flag;
   /* USER CODE END 2 */
@@ -854,13 +908,18 @@ void StartDefaultTask(void const * argument)
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 5 */
   HAL_GPIO_WritePin(GPIOB, COL1_Pin | COL2_Pin | COL3_Pin, GPIO_PIN_RESET);
-  	osTimerStart(myTimerKeyHandle, 300);
-  	service_relay_actuator_init();
-  	service_matrix_kbd_init();
-  	app_i2c_slave_init();
-  	/* Инициализировать дефолтные значения конфигурации через сервис */
-  	runtime_config_init_defaults(app_i2c_slave_get_ram());
-  	apply_runtime_settings_from_ram();  /* синхронизировать legacy-глобалы */
+  osTimerStart(myTimerKeyHandle, 300);
+
+  app_bootstrap_init_t bootstrap_init = {
+      .i2c_ram = app_context_i2c_ram(app_context_get()),
+      .context = app_context_get()
+  };
+  app_bootstrap_pre_init(&bootstrap_init);
+  app_bootstrap_wire();
+  app_bootstrap_start();
+  HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
+
+  apply_runtime_settings_from_ram();  /* синхронизировать legacy-глобалы */
   //	uint8_t dt[]={ 0x00,0x00,0x50,0x13,0x20,0x19,0x02,0x26};
   	lock_i2c2(100);
   //	HAL_I2C_Master_Transmit(&hi2c2, 0xD0,dt,8,5);
@@ -909,22 +968,21 @@ static uint8_t pn532_probe_bounded(pn532_t *pn, uint8_t *probe_buf) {
 void StartTask532(void const * argument)
 {
   /* USER CODE BEGIN StartTask532 */
+	static uint8_t pn532_uid_packet[I2C_PACKET_UID_532_LEN] = { 0 };
 	uint8_t cmd[2] = { 0x01, 0x00 };
 	uint8_t probe[1] = { 0 };
 	uint8_t pn_ack[32] = { 0 };
 	uint8_t sam[32] = { };
 	uint8_t stat[32] = { };
+	uint32_t now;
 //	const char *hmi_nfc_msg = "NFC";
 //	const uint8_t hmi_000[3] = { 0xFF, 0xFF, 0xFF };
 	//osDelay(100);
 	// int ret;
 	//	 pn532_set_normal_mode(&pn532);
 	osDelay(50);
-	/* Infinite loop */
-	// EventBits_t bits =
-	//xEventGroupWaitBits(tca6408a_event_group,
-	//					            P70_IRQ_EVT, pdTRUE,pdFALSE,100);
-
+	while (osSemaphoreWait(pn532SemaphoreHandle, 0) >= 0) {
+	}
 	for (;;) {
 		if (pn_i2c_fault) {
 			pn532_send_command(&pn532, SAMConfiguration, cmd, 1);
@@ -944,7 +1002,6 @@ void StartTask532(void const * argument)
 			pn532_read(&pn532, stat, 15);
 			pn_i2c_fault = 0;
 		}
-	//	osDelay(uid_ttl);
 		pn532_send_command(&pn532, InListPassiveTarget, cmd, 2);
 		memset(&pn_ack[0], 0xCC, 32);
 		probe[0] = 0;
@@ -952,26 +1009,34 @@ void StartTask532(void const * argument)
 		HAL_GPIO_WritePin(TFT_LED_GPIO_Port, TFT_LED_Pin, GPIO_PIN_RESET);
 		if (!pn532_probe_bounded(&pn532, probe)) { pn_i2c_fault = 1; osDelay(500); continue; }
 		pn532_read(&pn532, pn_ack, 7);
-		memset(slaveTxData, 0x04, 64);
-		osDelay(10);
+		memset(slaveTxData, 0x00, sizeof(slaveTxData));
 		osSemaphoreWait(pn532SemaphoreHandle,osWaitForever);
-		/* Bounded wait for PN532 data ready after semaphore */
 		if (!pn532_probe_bounded(&pn532, probe)) { pn_i2c_fault = 1; osDelay(500); continue; }
-		pn532_read(&pn532, slaveTxData, 32);
+		if (pn532_read(&pn532, slaveTxData, 32) < PN532_MIN_FRAME_LEN) { pn_i2c_fault = 1; osDelay(500); continue; }
+		if (pn532_payload_has_uid(slaveTxData, 32U) == 0U) {
+			continue;
+		}
 		pn_i2c_fault = 1;
+		now = HAL_GetTick();
+		if (pn532_uid_is_duplicate(&slaveTxData[PN532_UID_OFFSET], now) != 0U) {
+			HAL_GPIO_WritePin(TFT_LED_GPIO_Port, TFT_LED_Pin, GPIO_PIN_SET);
+			osDelay(reader_interval_sec*1000+1);
+			continue;
+		}
 		MsgHmi_t pn532_msg = { .hmi_lock = LOCKED, .msg_ttl = 1, .msg_buf =
 				HMI_MSG_KEY, .psize = strlen(HMI_MSG_KEY),
 		};
 		xQueueSendToFront(myQueueHmiMsgHandle, &pn532_msg, 1);
 		HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
 		osTimerStart(myTimerBuzzerOffHandle, BUZZER_TIMER2_MS);
-		/* Queued send card uid to Master */
 		I2cPacketToMaster_t pckt;
-		pckt.payload = &slaveTxData[13];
-		pckt.len = 8; //slaveTxData[13]+1;
+		memset(pn532_uid_packet, 0, sizeof(pn532_uid_packet));
+		memcpy(pn532_uid_packet, &slaveTxData[PN532_UID_OFFSET], PN532_UID_LEN);
+		pckt.payload = pn532_uid_packet;
+		pckt.len = PN532_UID_LEN;
 		pckt.type = PACKET_UID_532;
 		pckt.ttl = uid_ttl;
-		xQueueSendToFront(myQueueToMasterHandle, &pckt, 1);
+		xQueueSendToFront(myQueueToMasterHandle, &pckt, 100);
 		HAL_GPIO_WritePin(TFT_LED_GPIO_Port, TFT_LED_Pin, GPIO_PIN_SET);
 		uint16_t sig1 = 0x01;
 		xQueueSend(myQueueOLEDHandle, &sig1, 0);
@@ -999,7 +1064,11 @@ void StartTaskOLED(void const * argument)
 		xQueueReceive(myQueueOLEDHandle, &sig1, osWaitForever);
 		char o2[16] = { 0 };
 		const struct keyb *kbd = service_matrix_kbd_get_state();
-		uint8_t *iram = app_i2c_slave_get_ram();
+		const app_context_t *app_ctx = app_context_get_const();
+		uint8_t *iram = (uint8_t *)app_context_i2c_ram_const(app_ctx);
+		if (iram == NULL) {
+			iram = app_i2c_slave_get_ram();
+		}
 		if (sig1 == 2) {
 			ssd1306_FillCircle(120, 7, 5, White);
 			service_time_sync_datetimepack(iram);
@@ -1036,15 +1105,14 @@ void StartTaskOLED(void const * argument)
 void StartTasktca6408a(void const * argument)
 {
   /* USER CODE BEGIN StartTasktca6408a */
-    service_tca6408_init();
-    service_tca6408_post_bootstrap();
-
     for(;;) {
         uint16_t tca;
-        xQueueReceive(myQueueTCA6408Handle, &tca, osWaitForever);
-        (void)tca;
+        uint32_t wait_time = service_tca6408_is_button_debounce_active() ? 10U : osWaitForever;
+
+        if (xQueueReceive(myQueueTCA6408Handle, &tca, wait_time) == pdTRUE) {
+            (void)tca;
+        }
         service_tca6408_process_irq_event();
-        osDelay(1);
     }
   /* USER CODE END StartTasktca6408a */
 }
@@ -1053,9 +1121,16 @@ void StartTasktca6408a(void const * argument)
 void cb_OneSec(void const * argument)
 {
   /* USER CODE BEGIN cb_OneSec */
+	uint8_t *iram;
 	(void)argument;
-	/* This callback is called every 1 second but is not used for TIME packet */
-	/* TIME packets are generated by TCA6408a interrupt from DS3231 1Hz output */
+	iram = app_context_i2c_ram(app_context_get());
+	if (iram == NULL) {
+		iram = app_i2c_slave_get_ram();
+	}
+	if (iram != NULL) {
+		// (void)service_time_sync_on_tick(iram);
+		// runtime_config_apply_from_ram(iram);
+	}
   /* USER CODE END cb_OneSec */
 }
 

@@ -17,6 +17,7 @@
 extern "C" {
 #endif
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* Регистровая карта Ex (0xE0..0xE4) — из docs/stm32_i2c_bus_checkup.md §12 */
@@ -40,6 +41,15 @@ typedef struct {
 } runtime_config_t;
 
 /*
+ * app_context_t — контекст приложения, содержащий конфигурацию времени выполнения
+ * и указатель на RAM для I2C.
+ */
+typedef struct {
+    runtime_config_t runtime_config;
+    uint8_t *i2c_ram;
+} app_context_t;
+
+/*
  * Записать значения по умолчанию в ram[] и применить конфигурацию.
  * Вызывать однократно из StartDefaultTask до osKernelStart.
  * ram — указатель на массив ram[256] из app_i2c_slave.
@@ -60,6 +70,29 @@ void runtime_config_apply_from_ram(const uint8_t *ram);
  * Возвращает NULL до первого вызова runtime_config_init_defaults.
  */
 const runtime_config_t *runtime_config_get(void);
+
+/*
+ * Получить указатель на контекст приложения (read-only).
+ * Возвращает NULL до первого вызова runtime_config_init_defaults.
+ */
+app_context_t *app_context_get(void);
+const app_context_t *app_context_get_const(void);
+
+/*
+ * Установить активный контекст приложения.
+ */
+void app_context_set_active(app_context_t *context);
+
+/*
+ * Привязать указатель на RAM для I2C к контексту приложения.
+ */
+void app_context_bind_i2c_ram(app_context_t *context, uint8_t *ram);
+
+/*
+ * Получить указатель на RAM для I2C из контекста приложения.
+ */
+uint8_t *app_context_i2c_ram(app_context_t *context);
+const uint8_t *app_context_i2c_ram_const(const app_context_t *context);
 
 #ifdef __cplusplus
 }

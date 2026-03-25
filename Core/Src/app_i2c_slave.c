@@ -152,7 +152,7 @@ static uint8_t packet_len_for_type(I2cPacketType_t type, size_t requested_len)
 {
     size_t contract_len = requested_len;
     switch (type) {
-    case PACKET_UID_532: contract_len = I2C_PACKET_UID_532_LEN; break;
+    case PACKET_UID_532: contract_len = requested_len; break; /* Trust the packet length for UID as it can be 8 bytes */
     case PACKET_PIN:     contract_len = I2C_PACKET_PIN_LEN; break;
     case PACKET_WIEGAND: contract_len = I2C_PACKET_WIEGAND_LEN; break;
     case PACKET_PIN_HMI: contract_len = I2C_PACKET_PIN_HMI_LEN; break;
@@ -610,6 +610,7 @@ void StartTaskRxTxI2c1(void const *argument)
 
     for (;;) {
         uint16_t count = 0U;
+        uint32_t wait_start_tick = 0U;
         HAL_I2C_StateTypeDef i2c1_state;
         xQueueReceive(myQueueToMasterHandle, &pckt, osWaitForever);
 
@@ -625,9 +626,14 @@ void StartTaskRxTxI2c1(void const *argument)
             osDelay(10);
         } while ((i2c1_state & 0xFFU) != HAL_I2C_STATE_LISTEN);
 
+        wait_start_tick = tick_now();
         while (s_outbox_busy != 0U) {
             app_i2c_slave_poll_recovery();
             osDelay(I2C_SLAVE_OUTBOX_RETRY_DELAY_MS);
+            if (tick_expired(tick_now(), wait_start_tick + 5000U)) {
+                outbox_complete_ack(); /* Force flush outbox if stalled for 5 seconds to prevent deadlock */
+                break;
+            }
         }
 
         osDelay(I2C_SLAVE_PUBLISH_PRE_DELAY_MS);

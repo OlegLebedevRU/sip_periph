@@ -4,6 +4,18 @@
 **Дата составления:** 2026-03-22
 **Статус:** 🔄 В работе
 
+> Обновление 2026-03-25: следующий подшаг bootstrap-рефакторинга выполнен.
+> `app_bootstrap_start()` теперь владеет one-time startup для `service_tca6408`,
+> а доступ к I2C RAM в новых app/service wiring точках переводится на
+> `app_context_i2c_ram(...)` с compatibility fallback там, где миграция еще не завершена.
+>
+> Обновление 2026-03-25: стартовал шаг bootstrap-рефакторинга.
+> Реализованы `Core/Inc/app_bootstrap.h`, `Core/Src/app_bootstrap.c`,
+> гибридный `app_context` в `service_runtime_config`, и DI-документ
+> `docs/app_layer_di_concept.md`. На этом подшаге `StartDefaultTask()` уже
+> вызывает fixed hooks `app_bootstrap_pre_init() -> app_bootstrap_wire() -> app_bootstrap_start()`
+> без изменения порядка существующего startup-flow.
+
 ---
 
 ## 1. Контекст и диагностика

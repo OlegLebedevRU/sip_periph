@@ -16,13 +16,14 @@
 #include "service_time_sync.h"
 #include "service_runtime_config.h"
 #include "service_relay_actuator.h"
+#include "app_i2c_slave.h"
+#include "app_bootstrap.h"
 
 extern I2C_HandleTypeDef hi2c2;
 extern osMessageQId myQueueTCA6408Handle;
 extern osSemaphoreId pn532SemaphoreHandle;
 extern void lock_i2c2(uint32_t milisec);
 extern void unlock_i2c2(void);
-extern uint8_t *app_i2c_slave_get_ram(void);
 
 #define TCA_I2C_ADDR               (0x40U)
 #define TCA_BOOTSTRAP_EVENT        (1U)
@@ -39,74 +40,35 @@ static uint32_t s_btn_debounce_deadline = 0U;
 static uint32_t s_btn_suppress_until = 0U;
 static uint32_t s_ds_low_latched_at = 0U;
 static uint8_t  s_ds_low_seen = 0U;
+static uint8_t  s_pn532_irq_latched = 0U;
+static uint8_t  s_ds3231_irq_latched = 0U;
 
-static void tca_i2c_recover_if_needed(HAL_StatusTypeDef status)
+static void tca_handle_ds3231(uint8_t p0, uint8_t mixed_other)
 {
-    s_last_hal_status = status;
-    s_last_i2c_error = HAL_I2C_GetError(&hi2c2);
+    /* Always process TIME to keep system ticking regardless of IRQ bursts */
+    UNUSED(mixed_other);
 
-    if ((status == HAL_ERROR) || (status == HAL_TIMEOUT) || (status == HAL_BUSY)) {
-        HAL_I2C_DeInit(&hi2c2);
-        HAL_I2C_Init(&hi2c2);
-    }
-}
-
-static void tca_handle_pn532(uint8_t curr_inputs)
-{
-    if ((curr_inputs & TCA_P3_PN532_IRQ) == 0U) {
-        osSemaphoreRelease(pn532SemaphoreHandle);
-    }
-}
-
-static void tca_handle_ds3231(uint8_t curr_inputs, uint8_t mixed_other, uint32_t now)
-{
-    if ((curr_inputs & TCA_P0_DS3231_1HZ) == 0U) {
-        if (mixed_other != 0U) {
-            s_ds_low_seen = 1U;
-            s_ds_low_latched_at = now;
-            return;
-        }
-        if (s_ds_low_seen == 0U) {
-            uint8_t *iram = app_i2c_slave_get_ram();
-            (void)service_time_sync_on_tick(iram);
-            runtime_config_apply_from_ram(iram);
-            s_ds_low_seen = 1U;
-            s_ds_low_latched_at = now;
+    if ((p0 & TCA_P0_DS3231_1HZ) == 0U) { /* active LOW */
+        if (s_ds3231_irq_latched == 0U) {
+            uint8_t *ram = app_context_i2c_ram(app_context_get());
+            if (ram == NULL) {
+                ram = app_i2c_slave_get_ram();
+            }
+            if (ram != NULL) {
+                (void)service_time_sync_on_tick(ram);
+                runtime_config_apply_from_ram(ram);
+            }
+            s_ds3231_irq_latched = 1U;
         }
     } else {
-        if ((s_ds_low_seen != 0U) && ((now - s_ds_low_latched_at) >= TCA_DS_LOW_LATCH_WINDOW_MS)) {
-            s_ds_low_seen = 0U;
-        } else if (s_ds_low_seen == 0U) {
-            s_ds_low_latched_at = now;
-        }
+        s_ds3231_irq_latched = 0U;
     }
 }
 
-static void tca_finish_button_debounce(uint8_t stable_inputs, uint32_t now)
+static void tca_handle_btn_open(uint8_t changed_inputs, uint8_t curr_inputs)
 {
-    uint8_t button_low = (uint8_t)((stable_inputs & TCA_P2_EXT_BUTTON) == 0U);
+    uint32_t now = HAL_GetTick();
 
-    s_btn_debounce_active = 0U;
-
-    if (button_low == 0U) {
-        relay_ext_button_release();
-        return;
-    }
-
-    if (relay_is_relay1_active()) {
-        return;
-    }
-
-    if ((int32_t)(now - s_btn_suppress_until) < 0) {
-        return;
-    }
-
-    relay_request_pulse(RELAY_SRC_EXT_BTN);
-    s_btn_suppress_until = now + TCA_BTN_SUPPRESS_MS;
-}
-
-static void tca_handle_button(uint8_t changed_inputs, uint8_t curr_inputs, uint32_t now)
-{
     if ((changed_inputs & TCA_P2_EXT_BUTTON) != 0U) {
         if ((curr_inputs & TCA_P2_EXT_BUTTON) != 0U) {
             relay_ext_button_release();
@@ -124,12 +86,45 @@ static void tca_handle_button(uint8_t changed_inputs, uint8_t curr_inputs, uint3
 
     if ((s_btn_debounce_active != 0U) && ((int32_t)(now - s_btn_debounce_deadline) >= 0)) {
         uint8_t stable_inputs = curr_inputs;
-        if (service_tca6408_read_reg(TCA6408A_REG_INPUT, &stable_inputs) == HAL_OK) {
-            s_last_inputs = stable_inputs;
-            tca_finish_button_debounce(stable_inputs, now);
-        } else {
-            s_btn_debounce_active = 0U;
+        uint8_t button_low;
+
+        s_btn_debounce_active = 0U;
+
+        if (service_tca6408_read_reg(TCA6408A_REG_INPUT, &stable_inputs) != HAL_OK) {
+            return;
         }
+
+        s_last_inputs = stable_inputs;
+        button_low = (uint8_t)((stable_inputs & TCA_P2_EXT_BUTTON) == 0U);
+
+        if (button_low == 0U) {
+            relay_ext_button_release();
+            return;
+        }
+
+        if (relay_is_relay1_active()) {
+            return;
+        }
+
+        if ((int32_t)(now - s_btn_suppress_until) < 0) {
+            return;
+        }
+
+        relay_request_pulse(RELAY_SRC_EXT_BTN);
+        s_btn_suppress_until = now + TCA_BTN_SUPPRESS_MS;
+    }
+}
+
+static void tca_handle_pn532(uint8_t p3)
+{
+    if ((p3 & TCA_P3_PN532_IRQ) == 0U) { /* active LOW -> PN532 IRQ / ACK sync */
+        if (s_pn532_irq_latched == 0U) {
+            osSemaphoreRelease(pn532SemaphoreHandle);
+            /* Reset latch state here in case it gets stuck not clearing */
+        }
+        s_pn532_irq_latched = 1U;
+    } else {
+        s_pn532_irq_latched = 0U;
     }
 }
 
@@ -152,6 +147,7 @@ void service_tca6408_init(void)
     s_btn_suppress_until = 0U;
     s_ds_low_seen = 0U;
     s_ds_low_latched_at = 0U;
+    s_pn532_irq_latched = (uint8_t)((boot_inputs & TCA_P3_PN532_IRQ) == 0U);
 }
 
 void service_tca6408_post_bootstrap(void)
@@ -163,7 +159,6 @@ void service_tca6408_post_bootstrap(void)
 void service_tca6408_process_irq_event(void)
 {
     uint8_t curr_inputs = 0xFFU;
-    uint32_t now = HAL_GetTick();
 
     if (service_tca6408_read_reg(TCA6408A_REG_INPUT, &curr_inputs) != HAL_OK) {
         return;
@@ -176,8 +171,8 @@ void service_tca6408_process_irq_event(void)
         uint8_t mixed_other = (uint8_t)(changed & (TCA_P2_EXT_BUTTON | TCA_P3_PN532_IRQ));
 
         tca_handle_pn532(curr_inputs);
-        tca_handle_button(changed, curr_inputs, now);
-        tca_handle_ds3231(curr_inputs, mixed_other, now);
+        tca_handle_btn_open(changed, curr_inputs);
+        tca_handle_ds3231(curr_inputs, mixed_other);
     }
 
     s_prev_inputs = curr_inputs;
@@ -190,7 +185,6 @@ HAL_StatusTypeDef service_tca6408_write_reg(uint8_t reg_addr, uint8_t data)
     status = HAL_I2C_Mem_Write(&hi2c2, TCA_I2C_ADDR, (uint16_t)reg_addr,
                                I2C_MEMADD_SIZE_8BIT, &data, 1U, 100U);
     unlock_i2c2();
-    tca_i2c_recover_if_needed(status);
     return status;
 }
 
@@ -206,7 +200,6 @@ HAL_StatusTypeDef service_tca6408_read_reg(uint8_t reg_addr, uint8_t *data)
     status = HAL_I2C_Mem_Read(&hi2c2, TCA_I2C_ADDR, (uint16_t)reg_addr,
                               I2C_MEMADD_SIZE_8BIT, data, 1U, 100U);
     unlock_i2c2();
-    tca_i2c_recover_if_needed(status);
     return status;
 }
 

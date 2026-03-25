@@ -28,6 +28,7 @@ void service_relay_actuator_init(void)
     s_ext_btn_flag = 0U;
     s_ext_btn_pulse_active = 0U;
     s_auth_pulse_active = 0U;
+    HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
 }
 
 void relay_request_pulse(relay_source_t source)

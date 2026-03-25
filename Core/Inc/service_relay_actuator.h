@@ -15,6 +15,7 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include <stdbool.h>
 
 typedef enum {
     RELAY_SRC_AUTH_OK = 0,

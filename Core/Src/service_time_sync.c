@@ -9,6 +9,7 @@
 #include "main.h"
 #include "cmsis_os.h"
 #include "service_time_sync.h"
+#include "app_i2c_slave.h"
 
 /* ---- extern handles/queues defined in main.c --------------------------- */
 extern I2C_HandleTypeDef hi2c2;
