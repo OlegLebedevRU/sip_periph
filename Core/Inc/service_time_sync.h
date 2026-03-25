@@ -17,7 +17,7 @@ extern "C" {
 
 /*
  * Однократная инициализация DS3231M: отключить INTCN, включить SQW 1Hz.
- * Вызывать из StartDefaultTask до цикла, после lock_i2c2()/unlock_i2c2() готовы.
+ * Вызывать из StartDefaultTask до цикла, после создания i2c2_MutexHandle.
  */
 void service_time_sync_init(void);
 

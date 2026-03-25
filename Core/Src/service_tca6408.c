@@ -20,8 +20,7 @@
 extern I2C_HandleTypeDef hi2c2;
 extern osMessageQId myQueueTCA6408Handle;
 extern osSemaphoreId pn532SemaphoreHandle;
-extern void lock_i2c2(uint32_t milisec);
-extern void unlock_i2c2(void);
+extern osMutexId i2c2_MutexHandle;
 extern uint8_t *app_i2c_slave_get_ram(void);
 
 #define TCA_I2C_ADDR               (0x40U)
@@ -186,10 +185,12 @@ void service_tca6408_process_irq_event(void)
 HAL_StatusTypeDef service_tca6408_write_reg(uint8_t reg_addr, uint8_t data)
 {
     HAL_StatusTypeDef status;
-    lock_i2c2(100U);
+    if (osMutexWait(i2c2_MutexHandle, 100U) != osOK) {
+        return HAL_BUSY;
+    }
     status = HAL_I2C_Mem_Write(&hi2c2, TCA_I2C_ADDR, (uint16_t)reg_addr,
                                I2C_MEMADD_SIZE_8BIT, &data, 1U, 100U);
-    unlock_i2c2();
+    osMutexRelease(i2c2_MutexHandle);
     tca_i2c_recover_if_needed(status);
     return status;
 }
@@ -202,10 +203,12 @@ HAL_StatusTypeDef service_tca6408_read_reg(uint8_t reg_addr, uint8_t *data)
         s_last_i2c_error = 0xFFFFFFFFU;  /* NULL param sentinel */
         return HAL_ERROR;
     }
-    lock_i2c2(100U);
+    if (osMutexWait(i2c2_MutexHandle, 100U) != osOK) {
+        return HAL_BUSY;
+    }
     status = HAL_I2C_Mem_Read(&hi2c2, TCA_I2C_ADDR, (uint16_t)reg_addr,
                               I2C_MEMADD_SIZE_8BIT, data, 1U, 100U);
-    unlock_i2c2();
+    osMutexRelease(i2c2_MutexHandle);
     tca_i2c_recover_if_needed(status);
     return status;
 }

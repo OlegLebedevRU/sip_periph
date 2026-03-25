@@ -13,8 +13,7 @@
 /* ---- extern handles/queues defined in main.c --------------------------- */
 extern I2C_HandleTypeDef hi2c2;
 extern osMessageQId myQueueToMasterHandle;
-extern void lock_i2c2(uint32_t milisec);
-extern void unlock_i2c2(void);
+extern osMutexId i2c2_MutexHandle;
 
 /* ---- internal state ---------------------------------------------------- */
 static uint8_t s_hw_time[8] = {0};
@@ -55,12 +54,14 @@ static bool ds3231_read_time(uint8_t *buf)
     if (buf == NULL) {
         return false;
     }
-    lock_i2c2(100);
+    if (osMutexWait(i2c2_MutexHandle, 100) != osOK) {
+        return false;
+    }
     status = HAL_I2C_Master_Transmit(&hi2c2, DS3231_I2C_ADDR, &reg, 1, 5);
     if (status == HAL_OK) {
         status = HAL_I2C_Master_Receive(&hi2c2, DS3231_I2C_ADDR, buf, I2C_TIME_SYNC_WRITE_LEN, 5);
     }
-    unlock_i2c2();
+    osMutexRelease(i2c2_MutexHandle);
     return status == HAL_OK;
 }
 
@@ -72,9 +73,11 @@ static bool ds3231_write_time(const uint8_t *buf)
         return false;
     }
     memcpy(&payload[1], buf, I2C_TIME_SYNC_WRITE_LEN);
-    lock_i2c2(100);
+    if (osMutexWait(i2c2_MutexHandle, 100) != osOK) {
+        return false;
+    }
     status = HAL_I2C_Master_Transmit(&hi2c2, DS3231_I2C_ADDR, payload, sizeof(payload), 5);
-    unlock_i2c2();
+    osMutexRelease(i2c2_MutexHandle);
     return status == HAL_OK;
 }
 
@@ -87,14 +90,16 @@ void service_time_sync_init(void)
      *   INTCN=0 → SQW pin outputs 1Hz square wave (default RS1=RS2=0 → 1Hz).
      *   INTCN=1 (power-on default) → interrupt output from alarms. */
     uint8_t cntrl = 0;
-    lock_i2c2(100);
+    if (osMutexWait(i2c2_MutexHandle, 100) != osOK) {
+        return;
+    }
     HAL_I2C_Mem_Read(&hi2c2, DS3231_I2C_ADDR,
                      (uint16_t)DS3231_REG_CONTROL, I2C_MEMADD_SIZE_8BIT,
                      &cntrl, 1, 100);
     cntrl = cntrl & (~0x04U);   /* clear INTCN bit */
     uint8_t p[2] = { DS3231_REG_CONTROL, cntrl };
     HAL_I2C_Master_Transmit(&hi2c2, DS3231_I2C_ADDR, p, 2, 5);
-    unlock_i2c2();
+    osMutexRelease(i2c2_MutexHandle);
 }
 
 /* ---- public API -------------------------------------------------------- */

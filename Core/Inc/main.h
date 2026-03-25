@@ -126,8 +126,6 @@ void Error_Handler(void);
 /* USER CODE BEGIN EFP */
 void dwin_text_output(const uint16_t inaddr, const uint8_t *text_to_hmi, size_t elen);
 void hmi_show_auth_result(uint8_t auth_result);
-void lock_i2c2(uint32_t milisec);
-void unlock_i2c2();
 
 /* USER CODE END EFP */
 

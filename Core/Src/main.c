@@ -132,12 +132,6 @@ extern void cb_Tm_buzzerOff(void const * argument);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-void lock_i2c2(uint32_t milisec){
-	osMutexWait(i2c2_MutexHandle, milisec);
-}
-void unlock_i2c2(){
-	osMutexRelease(i2c2_MutexHandle);
-}
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 	app_irq_router_exti_callback(GPIO_Pin);
 }
