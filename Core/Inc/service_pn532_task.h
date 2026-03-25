@@ -4,8 +4,7 @@
  * PN532 NFC reader task module.
  * Владеет:
  *   - StartTask532 (FreeRTOS task body)
- *   - pn532_t handle, slaveTxData, uid, response buffers
- *   - I2C2 fault flag for PN532
+ *   - slaveTxData buffer, I2C2 fault flag for PN532
  *
  * Перенесено из main.c (шаг 10 рефакторинга).
  */

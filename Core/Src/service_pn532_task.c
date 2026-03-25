@@ -7,8 +7,7 @@
  * Владеет:
  *   - StartTask532 task body
  *   - pn532_probe_bounded() helper
- *   - pn532_t pn532 handle
- *   - slaveTxData[64], uid[32], response, pn_i2c_fault
+ *   - slaveTxData[64], pn_i2c_fault
  *
  * Зависимости (extern из main.c / других модулей):
  *   - pn532SemaphoreHandle, myQueueToMasterHandle, myQueueOLEDHandle
@@ -29,22 +28,19 @@ extern osMessageQId  myQueueOLEDHandle;
 extern osMessageQId  myQueueHmiMsgHandle;
 extern osTimerId     myTimerBuzzerOffHandle;
 
-/* ---- internal state (moved from main.c) -------------------------------- */
-static pn532_t        s_pn532;
-static pn532_result_t s_response;
-static uint8_t        s_uid[32];
+/* ---- internal state ---------------------------------------------------- */
 static uint8_t        s_slaveTxData[64];
-static int            s_pn_i2c_fault = 1;
+static volatile int   s_pn_i2c_fault = 1;
 
 /* ---- PN532 bounded probe helper ---------------------------------------- */
 #define PN532_PROBE_MAX_RETRIES  200U   /* 200 * 1ms = 200ms budget */
 #define PN532_PROBE_OK           1U
 #define PN532_PROBE_FAIL         0U
 
-static uint8_t pn532_probe_bounded(pn532_t *pn, uint8_t *probe_buf) {
+static uint8_t pn532_probe_bounded(uint8_t *probe_buf) {
 	for (uint16_t i = 0; i < PN532_PROBE_MAX_RETRIES; i++) {
-		pn532_read(pn, probe_buf, 1);
-		if (probe_buf[0] == 0x01) {
+		pn532_read(probe_buf, 1);
+		if (probe_buf[0] == PN532_READY_BYTE) {
 			probe_buf[0] = 0;
 			osDelay(1);
 			return PN532_PROBE_OK;
@@ -59,9 +55,6 @@ static uint8_t pn532_probe_bounded(pn532_t *pn, uint8_t *probe_buf) {
 
 void service_pn532_init(void)
 {
-	memset(&s_pn532, 0, sizeof(pn532_t));
-	memset(&s_response, 0, sizeof(pn532_result_t));
-	memset(s_uid, 0, sizeof(s_uid));
 	memset(s_slaveTxData, 0, sizeof(s_slaveTxData));
 	s_pn_i2c_fault = 1;
 }
@@ -84,8 +77,8 @@ void StartTask532(void const *argument)
 	uint8_t cmd[2] = { 0x01, 0x00 };
 	uint8_t probe[1] = { 0 };
 	uint8_t pn_ack[32] = { 0 };
-	uint8_t sam[32] = { };
-	uint8_t stat[32] = { };
+	uint8_t sam[32] = { 0 };
+	uint8_t stat[32] = { 0 };
 
 	osDelay(50);
 
@@ -95,37 +88,37 @@ void StartTask532(void const *argument)
 		                                        : READER_INTERVAL_SEC_DEFAULT;
 
 		if (s_pn_i2c_fault) {
-			pn532_send_command(&s_pn532, SAMConfiguration, cmd, 1);
+			pn532_send_command(SAMConfiguration, cmd, 1);
 			osDelay(1);
-			if (!pn532_probe_bounded(&s_pn532, probe)) { s_pn_i2c_fault = 1; osDelay(500); continue; }
-			pn532_read(&s_pn532, pn_ack, 7);
+			if (!pn532_probe_bounded(probe)) { s_pn_i2c_fault = 1; osDelay(500); continue; }
+			pn532_read(pn_ack, PN532_ACK_READ_LEN);
 			osDelay(5);
-			if (!pn532_probe_bounded(&s_pn532, probe)) { s_pn_i2c_fault = 1; osDelay(500); continue; }
-			pn532_read(&s_pn532, sam, 15);
+			if (!pn532_probe_bounded(probe)) { s_pn_i2c_fault = 1; osDelay(500); continue; }
+			pn532_read(sam, PN532_RESP_READ_LEN);
 			osDelay(1);
-			pn532_send_command(&s_pn532, GetGeneralStatus, cmd, 0);
+			pn532_send_command(GetGeneralStatus, cmd, 0);
 			osDelay(1);
-			if (!pn532_probe_bounded(&s_pn532, probe)) { s_pn_i2c_fault = 1; osDelay(500); continue; }
-			pn532_read(&s_pn532, pn_ack, 7);
+			if (!pn532_probe_bounded(probe)) { s_pn_i2c_fault = 1; osDelay(500); continue; }
+			pn532_read(pn_ack, PN532_ACK_READ_LEN);
 			osDelay(5);
-			if (!pn532_probe_bounded(&s_pn532, probe)) { s_pn_i2c_fault = 1; osDelay(500); continue; }
-			pn532_read(&s_pn532, stat, 15);
+			if (!pn532_probe_bounded(probe)) { s_pn_i2c_fault = 1; osDelay(500); continue; }
+			pn532_read(stat, PN532_RESP_READ_LEN);
 			s_pn_i2c_fault = 0;
 		}
 
-		pn532_send_command(&s_pn532, InListPassiveTarget, cmd, 2);
+		pn532_send_command(InListPassiveTarget, cmd, 2);
 		memset(&pn_ack[0], 0xCC, 32);
 		probe[0] = 0;
 		osDelay(1);
 		HAL_GPIO_WritePin(TFT_LED_GPIO_Port, TFT_LED_Pin, GPIO_PIN_RESET);
-		if (!pn532_probe_bounded(&s_pn532, probe)) { s_pn_i2c_fault = 1; osDelay(500); continue; }
-		pn532_read(&s_pn532, pn_ack, 7);
+		if (!pn532_probe_bounded(probe)) { s_pn_i2c_fault = 1; osDelay(500); continue; }
+		pn532_read(pn_ack, PN532_ACK_READ_LEN);
 		memset(s_slaveTxData, 0x04, 64);
 		osDelay(10);
 		osSemaphoreWait(pn532SemaphoreHandle, osWaitForever);
 		/* Bounded wait for PN532 data ready after semaphore */
-		if (!pn532_probe_bounded(&s_pn532, probe)) { s_pn_i2c_fault = 1; osDelay(500); continue; }
-		pn532_read(&s_pn532, s_slaveTxData, 32);
+		if (!pn532_probe_bounded(probe)) { s_pn_i2c_fault = 1; osDelay(500); continue; }
+		pn532_read(s_slaveTxData, PN532_DATA_READ_LEN);
 		s_pn_i2c_fault = 1;
 		MsgHmi_t pn532_msg = { .hmi_lock = LOCKED, .msg_ttl = 1, .msg_buf =
 				HMI_MSG_KEY, .psize = strlen(HMI_MSG_KEY),

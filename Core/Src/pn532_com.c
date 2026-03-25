@@ -3,220 +3,93 @@
  *
  *  Created on: Apr 10, 2025
  *      Author: oleg_
+ *
+ *  Low-level I2C driver for PN532 NFC module.
+ *  Cleaned: removed dead Linux-ported code, fixed I2C timeouts,
+ *  replaced VLA with fixed buffer, added mutex-acquire check.
  */
 
-#include <stdio.h>
 #include <string.h>
-#include <stdlib.h>
 #include "main.h"
 #include "cmsis_os.h"
 #include "pn532_com.h"
-#define I2C_ADDRESS 0x48   // Example I2C address for the PN532 RFID module
+
+/* ---- HW binding -------------------------------------------------------- */
 extern I2C_HandleTypeDef hi2c2;
-typedef struct {
-    uint8_t preamble;
-    uint8_t start_code1;
-    uint8_t start_code2;
-    uint8_t length;
-    uint8_t length_checksum;
-    uint8_t frame_data[256];
-    uint8_t data_checksum;
-    uint8_t postamble;
-} pn532_frame_t;
+extern osMutexId         i2c2_MutexHandle;
 
-
+/* ---- PN532 frame constants (internal) ---------------------------------- */
 #define PN532_PREAMBLE      0x00
 #define PN532_STARTCODE1    0x00
 #define PN532_STARTCODE2    0xFF
 #define PN532_POSTAMBLE     0x00
-
 #define PN532_HOSTTOPN532   0xD4
-#define PN532_TFI_RECEIVE   0xD5
-#define PN532_ACK_FRAME    {0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00}
 
+/* Max PN532 data field + frame overhead: 255 + 9 = 264 */
+#define PN532_MAX_FRAME_SIZE  265U
 
-int pn532_is_pn532killer(pn532_t *pn532)
-{
-    int ret;
-
-    if ((ret = pn532_send_command(pn532, checkPn532Killer, NULL, 0))>0) return ret;
-    if ((ret = pn532_wait_response(pn532, checkPn532Killer))>0) return ret;
-
-    if (ret == 0) return 1;
-    return 0;
+/* ---- I2C mutex helpers (return 0 on success, -1 on timeout) ------------ */
+static inline int i2c2_lock(uint32_t ms) {
+    return (osMutexWait(i2c2_MutexHandle, ms) == osOK) ? 0 : -1;
 }
 
-int pn532_set_normal_mode(pn532_t *pn532)
-{
-    int ret;
-    uint8_t cmd[14] = {0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-//uint8_t cmdwup[]={0x55, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x03, 0xFD, 0xD4, 0x14, 0x01, 0x17, 0x00};
-    if ((ret = pn532_write(pn532, cmd, sizeof(cmd)))>0) return ret;
-    osDelay(10);
-   // pn532_read(pn532, cmd, 7);
-    osDelay(100);
-    cmd[0] = 0x01;
-    if ((ret = pn532_send_command(pn532, SAMConfiguration, cmd, 1))>0) return ret;
-    osDelay(10);
-    if (pn532_read(pn532, cmd, 7) < 1) return -1;
-
-    return 0;
+static inline void i2c2_unlock(void) {
+    osMutexRelease(i2c2_MutexHandle);
 }
 
-/* Function to write data to PN532 */
-int pn532_write(pn532_t *pn532, uint8_t *data, size_t len) {
-   // ssize_t written = write(pn532->fd, data, len);
-	uint32_t tm = len/10+1;
-	lock_i2c2(100);
-    if (HAL_I2C_Master_Transmit(&hi2c2, I2C_ADDRESS, data, len,tm)!=HAL_OK) {
-     //   perror("Write error");
-    	unlock_i2c2();
-        return -1;
-    }
-    unlock_i2c2();
-    return 0;
+/* ---- Public API -------------------------------------------------------- */
+
+/* Write raw bytes to PN532 over I2C.
+ * Returns  0 on success, -1 on error.  */
+int pn532_write(uint8_t *data, size_t len) {
+    if (i2c2_lock(100) != 0) return -1;
+
+    HAL_StatusTypeDef st = HAL_I2C_Master_Transmit(
+        &hi2c2, PN532_I2C_ADDR, data, (uint16_t)len, PN532_I2C_TIMEOUT_MS);
+
+    i2c2_unlock();
+    return (st == HAL_OK) ? 0 : -1;
 }
 
-/* Function to read data from PN532 */
-int pn532_read(pn532_t *pn532, uint8_t *buffer, size_t len) {
- //   ssize_t read_bytes = 0;
-uint32_t tm = len/10+1;
-lock_i2c2(100);
-    if(HAL_I2C_Master_Receive(&hi2c2, I2C_ADDRESS,buffer, len,tm) !=HAL_OK){
-    	unlock_i2c2();
-    	return 0;
-    }
-    unlock_i2c2();
-    return (int)len;
+/* Read raw bytes from PN532 over I2C.
+ * Returns number of bytes read (== len) on success, 0 on error. */
+int pn532_read(uint8_t *buffer, size_t len) {
+    if (i2c2_lock(100) != 0) return 0;
+
+    HAL_StatusTypeDef st = HAL_I2C_Master_Receive(
+        &hi2c2, PN532_I2C_ADDR, buffer, (uint16_t)len, PN532_I2C_TIMEOUT_MS);
+
+    i2c2_unlock();
+    return (st == HAL_OK) ? (int)len : 0;
 }
 
-/* Function to send command and get response */
-int pn532_send_command(pn532_t *pn532, uint8_t cmd, uint8_t *data, size_t data_len) {
-    uint8_t packet[data_len + 10];
-    uint8_t checksum, len_byte;
-    size_t idx = 0, i;
+/* Build a PN532 command frame and transmit it.
+ * Returns  0 on success, -1 on error. */
+int pn532_send_command(uint8_t cmd, uint8_t *data, size_t data_len) {
+    if (data_len > 250U) return -1;            /* guard against overflow */
+
+    uint8_t packet[PN532_MAX_FRAME_SIZE];
+    size_t idx = 0;
 
     packet[idx++] = PN532_PREAMBLE;
     packet[idx++] = PN532_STARTCODE1;
     packet[idx++] = PN532_STARTCODE2;
 
-    len_byte = 2 + data_len;
+    uint8_t len_byte = (uint8_t)(2U + data_len);
     packet[idx++] = len_byte;
-    packet[idx++] = ~len_byte + 1;
+    packet[idx++] = (uint8_t)(~len_byte + 1U);
 
     packet[idx++] = PN532_HOSTTOPN532;
     packet[idx++] = cmd;
 
-    checksum = PN532_HOSTTOPN532 + cmd;
-    for (i = 0; i < data_len; i++) {
+    uint8_t checksum = PN532_HOSTTOPN532 + cmd;
+    for (size_t i = 0; i < data_len; i++) {
         packet[idx++] = data[i];
         checksum += data[i];
     }
 
-    packet[idx++] = ~checksum + 1;
+    packet[idx++] = (uint8_t)(~checksum + 1U);
     packet[idx++] = PN532_POSTAMBLE;
 
-    if (pn532_write(pn532, packet, idx) < 0) return -1;
-
-    return 0;
-}
-
-// response should be uint8_t buffer[260];
-//  0 Success
-// -1 Read error
-// -2
-// -3 Length checksum error
-// -4 Data checksum error
-// -5 Postamble error
-// -6 Data frame TFI error
-// -7 Data frame length error
-int pn532_read_response(pn532_t *pn532, pn532_result_t *response)
-{
-    int i, ret = 0;
-    uint8_t data_checksum;
-    pn532_frame_t frame;
-
-    if (!response) response = &pn532->result;
-
-    do {
-        if (pn532_read(pn532, &frame.preamble, 1) != 1)
-            return -1;
-    }
-    while (frame.preamble != PN532_PREAMBLE);
-
-    if (pn532_read(pn532, &frame.start_code1, 3) != 3)
-        return -1;
-
-    if (pn532_read(pn532, &frame.length_checksum, frame.length+1) != frame.length+1)
-        return -1;
-
-    if (frame.length && ((frame.length + frame.length_checksum) & 0xFF)  != 0) {
-        return -3;    // Length checksum error
-    }
-
-    if (frame.length)
-    {
-        for (i=0, data_checksum = 0; i < frame.length; i++) {
-            data_checksum += frame.frame_data[i];
-        }
-
-        if (pn532_read(pn532, &frame.data_checksum, 1) != 1)
-            return -1;
-
-        if (((frame.data_checksum + data_checksum) & 0xFF) != 0)
-            return -4; // Data checksum error
-    }
-
-    if (pn532_read(pn532, &frame.postamble, 1) != 1)
-        return -1;
-
-    if (frame.postamble != 0)
-        return -5; // Postamble error
-
-    if (ret || frame.length == 0) return ret;
-
-    if (frame.frame_data[0] != PN532_TFI_RECEIVE)
-        return -6;
-
-    if (frame.length < 2) return -7;
-
-    response->cmd = frame.frame_data[1] - 1;
-    response->status = PN_SUCCESS;
-    response->len = frame.length-2;
-    memcpy(response->data, frame.frame_data+2, response->len);
-
-    if ((response->cmd == InCommunicateThru || response->cmd == InDataExchange) && frame.length > 2) {
-        response->status = frame.frame_data[2];
-        if (frame.frame_data[2] == 0 && frame.length > 16)
-            memcpy(response->data, frame.frame_data+3, --response->len);
-    }
-
-    return 0;
-}
-
-int pn532_wait_response(pn532_t *pn532, uint8_t cmd)
-{
-    int ret;
-
-    pn532->result.cmd = 0;
-    while ((ret = pn532_read_response(pn532, NULL)) == 0) {
-        if (pn532->result.cmd == cmd) break;
-    }
-
-    return ret;
-}
-
-char *pn532_strerror(int ret)
-{
-    switch (ret)
-    {
-    case  0: return "Success";
-    case -1: return "Read/Write error";
-    case -3: return "Length checksum error";
-    case -4: return "Data checksum error";
-    case -5: return "Postamble error";
-    case -6: return "Data frame TFI error";
-    case -7: return "Data frame length error";
-    default: return "Unknown error";
-    }
+    return pn532_write(packet, idx);
 }
