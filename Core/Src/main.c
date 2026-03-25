@@ -29,10 +29,6 @@
 #include <stdbool.h>
 #include "FreeRTOS.h"
 #include "event_groups.h"
-#include "pn532_com.h"
-#include "ssd1306.h"
-#include "ssd1306_tests.h"
-#include "ssd1306_fonts.h"
 #include "tca6408a_map.h"
 #include "service_runtime_config.h"
 #include "app_irq_router.h"
@@ -42,6 +38,8 @@
 #include "service_matrix_kbd.h"
 #include "app_i2c_slave.h"
 #include "service_tca6408.h"
+#include "service_pn532_task.h"
+#include "service_oled_task.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -115,14 +113,10 @@ __IO uint8_t rele_mode_flag;
 __IO uint8_t matrix_keyb_freeze;
 __IO uint8_t reader_interval_sec;
 
-pn532_result_t response = { };
-uint8_t uid[32] = { };
-uint8_t slaveTxData[64] = { };
+/* PN532 buffers moved to service_pn532_task.c (шаг 10) */
 uint8_t slaveRxData;
-pn532_t pn532;
 uint8_t rxbuf[128] = { };
 
-static int pn_i2c_fault = 1;
 __IO uint8_t key_buf_offset = 0;
 
 static void apply_runtime_settings_from_ram(void);
@@ -142,9 +136,9 @@ static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM11_Init(void);
 void StartDefaultTask(void const * argument);
-void StartTask532(void const * argument);
+extern void StartTask532(void const * argument);
 extern void StartTaskRxTxI2c1(void const * argument);
-void StartTaskOLED(void const * argument);
+extern void StartTaskOLED(void const * argument);
 extern void StartTaskWiegand(void const * argument);
 extern void StartTaskHmi(void const * argument);
 extern void StartTaskHmiMsg(void const * argument);
@@ -211,7 +205,7 @@ void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c) {
 	} else if (hi2c == &hi2c2){
 		HAL_I2C_DeInit(hi2c);
 		HAL_I2C_Init(hi2c);
-		pn_i2c_fault = 1;
+		service_pn532_notify_i2c_fault();
 	}
 }
 
@@ -256,7 +250,7 @@ int main(void)
   MX_USART2_UART_Init();
   MX_TIM11_Init();
   /* USER CODE BEGIN 2 */
-	memset(&pn532, 0, sizeof(pn532_t));
+	service_pn532_init();
 	key_buf_offset = 0;
 	memset(app_i2c_slave_get_ram(), 0, 256);
 
@@ -887,98 +881,7 @@ void StartDefaultTask(void const * argument)
  */
 /* USER CODE END Header_StartTask532 */
 
-/* ---- PN532 bounded probe helper ---------------------------------------- */
-#define PN532_PROBE_MAX_RETRIES  200U   /* 200 * 1ms = 200ms budget */
-#define PN532_PROBE_OK           1U
-#define PN532_PROBE_FAIL         0U
-
-static uint8_t pn532_probe_bounded(pn532_t *pn, uint8_t *probe_buf) {
-	for (uint16_t i = 0; i < PN532_PROBE_MAX_RETRIES; i++) {
-		pn532_read(pn, probe_buf, 1);
-		if (probe_buf[0] == 0x01) {
-			probe_buf[0] = 0;
-			osDelay(1);
-			return PN532_PROBE_OK;
-		}
-		osDelay(1);
-	}
-	probe_buf[0] = 0;
-	return PN532_PROBE_FAIL;
-}
-
-void StartTask532(void const * argument)
-{
-  /* USER CODE BEGIN StartTask532 */
-	uint8_t cmd[2] = { 0x01, 0x00 };
-	uint8_t probe[1] = { 0 };
-	uint8_t pn_ack[32] = { 0 };
-	uint8_t sam[32] = { };
-	uint8_t stat[32] = { };
-//	const char *hmi_nfc_msg = "NFC";
-//	const uint8_t hmi_000[3] = { 0xFF, 0xFF, 0xFF };
-	//osDelay(100);
-	// int ret;
-	//	 pn532_set_normal_mode(&pn532);
-	osDelay(50);
-	/* Infinite loop */
-	// EventBits_t bits =
-	//xEventGroupWaitBits(tca6408a_event_group,
-	//					            P70_IRQ_EVT, pdTRUE,pdFALSE,100);
-
-	for (;;) {
-		if (pn_i2c_fault) {
-			pn532_send_command(&pn532, SAMConfiguration, cmd, 1);
-			osDelay(1);
-			if (!pn532_probe_bounded(&pn532, probe)) { pn_i2c_fault = 1; osDelay(500); continue; }
-			pn532_read(&pn532, pn_ack, 7);
-			osDelay(5);
-			if (!pn532_probe_bounded(&pn532, probe)) { pn_i2c_fault = 1; osDelay(500); continue; }
-			pn532_read(&pn532, sam, 15);
-			osDelay(1);
-			pn532_send_command(&pn532, GetGeneralStatus, cmd, 0);
-			osDelay(1);
-			if (!pn532_probe_bounded(&pn532, probe)) { pn_i2c_fault = 1; osDelay(500); continue; }
-			pn532_read(&pn532, pn_ack, 7);
-			osDelay(5);
-			if (!pn532_probe_bounded(&pn532, probe)) { pn_i2c_fault = 1; osDelay(500); continue; }
-			pn532_read(&pn532, stat, 15);
-			pn_i2c_fault = 0;
-		}
-	//	osDelay(uid_ttl);
-		pn532_send_command(&pn532, InListPassiveTarget, cmd, 2);
-		memset(&pn_ack[0], 0xCC, 32);
-		probe[0] = 0;
-		osDelay(1);
-		HAL_GPIO_WritePin(TFT_LED_GPIO_Port, TFT_LED_Pin, GPIO_PIN_RESET);
-		if (!pn532_probe_bounded(&pn532, probe)) { pn_i2c_fault = 1; osDelay(500); continue; }
-		pn532_read(&pn532, pn_ack, 7);
-		memset(slaveTxData, 0x04, 64);
-		osDelay(10);
-		osSemaphoreWait(pn532SemaphoreHandle,osWaitForever);
-		/* Bounded wait for PN532 data ready after semaphore */
-		if (!pn532_probe_bounded(&pn532, probe)) { pn_i2c_fault = 1; osDelay(500); continue; }
-		pn532_read(&pn532, slaveTxData, 32);
-		pn_i2c_fault = 1;
-		MsgHmi_t pn532_msg = { .hmi_lock = LOCKED, .msg_ttl = 1, .msg_buf =
-				HMI_MSG_KEY, .psize = strlen(HMI_MSG_KEY),
-		};
-		xQueueSendToFront(myQueueHmiMsgHandle, &pn532_msg, 1);
-		HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
-		osTimerStart(myTimerBuzzerOffHandle, BUZZER_TIMER2_MS);
-		/* Queued send card uid to Master */
-		I2cPacketToMaster_t pckt;
-		pckt.payload = &slaveTxData[13];
-		pckt.len = 8; //slaveTxData[13]+1;
-		pckt.type = PACKET_UID_532;
-		pckt.ttl = uid_ttl;
-		xQueueSendToFront(myQueueToMasterHandle, &pckt, 1);
-		HAL_GPIO_WritePin(TFT_LED_GPIO_Port, TFT_LED_Pin, GPIO_PIN_SET);
-		uint16_t sig1 = 0x01;
-		xQueueSend(myQueueOLEDHandle, &sig1, 0);
-		osDelay(reader_interval_sec*1000+1);
-	}
-  /* USER CODE END StartTask532 */
-}
+/* StartTask532 moved to service_pn532_task.c (шаг 10 рефакторинга) */
 
 /* USER CODE BEGIN Header_StartTaskOLED */
 /**
@@ -987,36 +890,8 @@ void StartTask532(void const * argument)
  * @retval None
  */
 /* USER CODE END Header_StartTaskOLED */
-void StartTaskOLED(void const * argument)
-{
-  /* USER CODE BEGIN StartTaskOLED */
-	uint16_t sig1 = 0;
-	osDelay(1);
-	ssd1306_Init();
-	ssd1306_Fill(Black);
-	/* Infinite loop */
-	for (;;) {
-		xQueueReceive(myQueueOLEDHandle, &sig1, osWaitForever);
-		char o2[16] = { 0 };
-		const struct keyb *kbd = service_matrix_kbd_get_state();
-		uint8_t *iram = app_i2c_slave_get_ram();
-		if (sig1 == 2) {
-			ssd1306_FillCircle(120, 7, 5, White);
-			service_time_sync_datetimepack(iram);
-			ssd1306_SetCursor(4, 4);
-			ssd1306_WriteString((char*) service_time_sync_get_datetime_str(), Font_6x8, White);
-		} else if (sig1 == 1) {
-			ssd1306_FillCircle(120, 7, 2, Black);
-			ssd1306_FillRectangle(1, 16, 127, 62, Black);
-			ssd1306_SetCursor(32 - kbd->offset * 2, 32);
-			strcpy(o2, (char*) kbd->buf);
-			ssd1306_WriteString(o2, Font_16x24, White);
-		}
-		ssd1306_UpdateScreen();
-		osDelay(1);
-	}
-  /* USER CODE END StartTaskOLED */
-}
+
+/* StartTaskOLED moved to service_oled_task.c (шаг 11 рефакторинга) */
 
 /* USER CODE BEGIN Header_StartTasktca6408a */
 /**

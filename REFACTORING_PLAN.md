@@ -746,6 +746,60 @@ void StartDefaultTask(void const *argument) {
 
 ---
 
+### ШАГ 11 — `service_pn532_task.c`: PN532 NFC reader task
+
+**Цель:** вынести `StartTask532` (~70 строк), `pn532_probe_bounded()`, буферы
+`pn532_t pn532`, `slaveTxData[64]`, `uid[32]`, `response`, `pn_i2c_fault` из `main.c`.
+Заменить прямое обращение к `reader_interval_sec` (legacy-глобал) на `runtime_config_get()`.
+
+**Файлы:**
+- СОЗДАТЬ: `Core/Inc/service_pn532_task.h`
+- СОЗДАТЬ: `Core/Src/service_pn532_task.c`
+- ИЗМЕНИТЬ: `Core/Src/main.c` — удалить тело `StartTask532`, `pn532_probe_bounded`,
+  перенесённые глобалы; добавить `service_pn532_init()` в `StartDefaultTask`;
+  заменить `pn_i2c_fault = 1` в `HAL_I2C_ErrorCallback` на `service_pn532_notify_i2c_fault()`
+
+**Публичный API (`service_pn532_task.h`):**
+```c
+void service_pn532_init(void);
+void StartTask532(void const *argument);
+void service_pn532_notify_i2c_fault(void);
+uint8_t *service_pn532_get_slaveTxData(void);
+```
+
+**Контрольные точки:**
+- [x] `service_pn532_task.h/.c` созданы
+- [x] В `main.c` нет `StartTask532` тела, нет `pn532_probe_bounded`, нет `pn532_t pn532`
+- [x] `reader_interval_sec` заменён на `runtime_config_get()->reader_interval_sec`
+- [x] `HAL_I2C_ErrorCallback` hi2c2 ветка вызывает `service_pn532_notify_i2c_fault()`
+- [x] Компиляция чистая
+
+---
+
+### ШАГ 12 — `service_oled_task.c`: OLED display task
+
+**Цель:** вынести `StartTaskOLED` (~30 строк) из `main.c`.
+Задача не имеет собственного состояния — чистый consumer очереди `myQueueOLEDHandle`.
+
+**Файлы:**
+- СОЗДАТЬ: `Core/Inc/service_oled_task.h`
+- СОЗДАТЬ: `Core/Src/service_oled_task.c`
+- ИЗМЕНИТЬ: `Core/Src/main.c` — удалить тело `StartTaskOLED`, добавить `extern` прототип,
+  убрать `#include "ssd1306.h"`, `"ssd1306_tests.h"`, `"ssd1306_fonts.h"`, `"pn532_com.h"`
+
+**Публичный API (`service_oled_task.h`):**
+```c
+void StartTaskOLED(void const *argument);
+```
+
+**Контрольные точки:**
+- [x] `service_oled_task.h/.c` созданы
+- [x] В `main.c` нет `StartTaskOLED` тела
+- [x] Неиспользуемые `#include` удалены из `main.c`
+- [x] Компиляция чистая
+
+---
+
 ## 4. Функциональный тест после рефакторинга
 
 После завершения всех шагов проверить каждый поток:
@@ -843,3 +897,5 @@ runtime_config_t обновлён → следующий relay/button запро
 | 8. app_i2c_slave | ✅ Выполнен | app_i2c_slave.h/.c, main.c | 2026-03-22 |
 | 9. main.c bootstrap | ✅ Выполнен | main.c | 2026-03-22 |
 | 10. Валидация компиляции | ✅ Выполнена | изменённые файлы | 2026-03-22 |
+| 11. service_pn532_task | ✅ Выполнен | service_pn532_task.h/.c, main.c | 2026-03-25 |
+| 12. service_oled_task | ✅ Выполнен | service_oled_task.h/.c, main.c | 2026-03-25 |
