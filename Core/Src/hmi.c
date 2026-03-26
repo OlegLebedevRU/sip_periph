@@ -11,17 +11,15 @@
 #include "main.h"
 #include "cmsis_os.h"
 #include "app_uart_dwin.h"
+#include "app_uart_dwin_tx.h"
 #include "app_i2c_slave.h"
 
 extern osMessageQId myQueueHMIRecvRawHandle, myQueueToMasterHandle,
 		myQueueHmiMsgHandle;
 extern osTimerId myTimerHmiTimeoutHandle, myTimerHmiTtlHandle,myTimerReleBeforeHandle,myTimerBuzzerOffHandle;
-extern UART_HandleTypeDef huart2;
-static uint8_t s_hmi_txbuf[256];
-static osMutexId s_hmi_tx_mutex = NULL;
 static volatile uint32_t s_hmi_pending_events = 0U;
 
-/* dwin_uart_start() объявлена в app_uart_dwin.h */
+/* dwin_uart_start() declared in app_uart_dwin.h */
 static READER_t pin;
 static READER_t pin_snapshot;   /* stable copy sent to I2C queue */
 static MsgHmi_t msg_hmi = { };
@@ -43,8 +41,6 @@ uint8_t hmi_autodelete_sec = HMI_AUTODELETE_SEC_DEFAULT;
 #define DWIN_HDR_SIZE_LOCAL     3U
 #define DWIN_MIN_KEY_PKT_SIZE   9U
 #define DWIN_CMD_VP_READ        0x83U
-#define HMI_TX_WAIT_RETRIES     20U
-#define HMI_TX_WAIT_DELAY_MS    10U
 #define HMI_TX_FRAME_OVERHEAD   6U
 #define HMI_DIAG_TEXT_SIZE      12U
 #define HMI_MSG_BUF_SIZE        (sizeof(msg_hmi.msg_buf))
@@ -54,8 +50,6 @@ uint8_t hmi_autodelete_sec = HMI_AUTODELETE_SEC_DEFAULT;
 #define HMI_EVT_MSG_TTL         0x00000002UL
 #define HMI_RX_IDLE_WAIT_MS     50U
 #define HMI_MSG_IDLE_WAIT_MS    100U
-
-extern void dwin_uart_start(void);
 
 static uint8_t hmi_extract_input_code(const MsgUart_t *uart_msg, uint8_t *code);
 static void resetpinbuf(void);
@@ -157,14 +151,6 @@ static uint32_t hmi_wait_for_host_message(void)
 	return (uint32_t)xQueueReceive(myQueueHmiMsgHandle, &msg_hmi, HMI_MSG_IDLE_WAIT_MS);
 }
 
-static void hmi_ensure_tx_mutex(void)
-{
-	if (s_hmi_tx_mutex == NULL) {
-		osMutexDef(hmiTxMutex);
-		s_hmi_tx_mutex = osMutexCreate(osMutex(hmiTxMutex));
-	}
-}
-
 //----------------------
 READER_t* get_pin_data() {
 	return &pin;
@@ -174,17 +160,9 @@ void dwin_text_output(const uint16_t inaddr, const uint8_t *text_to_hmi,
 		size_t elen) {
 	size_t len = 0U;
 	uint16_t addr = inaddr;
-	HAL_StatusTypeDef tx_status;
+	uint8_t frame[DWIN_TX_BUF_SIZE];
 
 	if (text_to_hmi == NULL) {
-		return;
-	}
-
-	hmi_ensure_tx_mutex();
-	if (s_hmi_tx_mutex == NULL) {
-		return;
-	}
-	if (osMutexWait(s_hmi_tx_mutex, osWaitForever) != osOK) {
 		return;
 	}
 
@@ -193,26 +171,17 @@ void dwin_text_output(const uint16_t inaddr, const uint8_t *text_to_hmi,
 	} else {
 		len = elen;
 	}
-	if (len > (sizeof(s_hmi_txbuf) - HMI_TX_FRAME_OVERHEAD)) {
-		len = sizeof(s_hmi_txbuf) - HMI_TX_FRAME_OVERHEAD;
-	}
-
-	for (uint8_t r = 0U; r < HMI_TX_WAIT_RETRIES; r++) {
-		if (huart2.gState == HAL_UART_STATE_READY) {
-			break;
-		}
-		osDelay(HMI_TX_WAIT_DELAY_MS);
+	if (len > (sizeof(frame) - HMI_TX_FRAME_OVERHEAD)) {
+		len = sizeof(frame) - HMI_TX_FRAME_OVERHEAD;
 	}
 
 	{
 		const uint8_t pbyte[] = { 0x5A, 0xA5, (uint8_t)(len + 3U), 0x82,
 				(uint8_t) ((addr >> 8) & 0xFF), (uint8_t) (addr & 0xFF) };
-		memcpy(s_hmi_txbuf, pbyte, sizeof(pbyte));
+		memcpy(frame, pbyte, sizeof(pbyte));
 	}
-	memcpy(s_hmi_txbuf + HMI_TX_FRAME_OVERHEAD, (const void*) text_to_hmi, len);
-	tx_status = HAL_UART_Transmit_IT(&huart2, s_hmi_txbuf, len + HMI_TX_FRAME_OVERHEAD);
-	(void)tx_status;
-	osMutexRelease(s_hmi_tx_mutex);
+	memcpy(frame + HMI_TX_FRAME_OVERHEAD, (const void*) text_to_hmi, len);
+	dwin_tx_send(frame, (uint16_t)(len + HMI_TX_FRAME_OVERHEAD));
 }
 
 static void resetpinbuf(void) {
@@ -247,7 +216,7 @@ void hmi_show_auth_result(uint8_t auth_result)
 void StartTaskHmi(void const *argument) {
 	MsgUart_t uart_msg;
 	(void)argument;
-	hmi_ensure_tx_mutex();
+	dwin_tx_init();
 	osDelay(100);
 	resetpindata();
 	

@@ -140,7 +140,7 @@ void hmi_show_auth_result(uint8_t auth_result);
 #define BUZZER_TIMER2_MS 20
 #define HMI_MSG_KEY "-- KEY --"
 #define READER_INTERVAL_SEC_DEFAULT 5
-#define HMI_INPUT_INTERVAL_SEC_DEFAULT 1
+#define HMI_INPUT_INTERVAL_SEC_DEFAULT 10
 #define HMI_AUTODELETE_SEC_DEFAULT 10
 #define EXT_INT_Pin GPIO_PIN_13
 #define EXT_INT_GPIO_Port GPIOC

@@ -256,7 +256,7 @@ int main(void)
 
   /* definition and creation of myTimerHmiTimeout */
   osTimerDef(myTimerHmiTimeout, cb_Hmi_Pin_Timeout);
-  myTimerHmiTimeoutHandle = osTimerCreate(osTimer(myTimerHmiTimeout), osTimerPeriodic, NULL);
+  myTimerHmiTimeoutHandle = osTimerCreate(osTimer(myTimerHmiTimeout), osTimerOnce, NULL);
   rtos_require_alloc(myTimerHmiTimeoutHandle);
 
   /* definition and creation of myTimerHmiTtl */

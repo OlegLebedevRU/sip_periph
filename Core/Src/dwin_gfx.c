@@ -3,9 +3,9 @@
  *
  * DWIN T5L DGUS graphic helpers for DMG80480C043.
  *
- * UART safety: gfx_send() polls huart2.gState and waits (with osDelay)
- * until TX is idle before calling HAL_UART_Transmit_IT — same bus as
- * dwin_text_output() in hmi.c but with its own static buffer.
+ * UART safety: gfx_send() delegates to the shared DWIN TX transport
+ * (app_uart_dwin_tx.c) which serialises all USART2 TX traffic with a
+ * common mutex and buffer.
  *
  * === Drawing primitives ===
  * T5L DGUS does NOT support arbitrary framebuffer drawing via UART.
@@ -22,27 +22,20 @@
  */
 
 #include "dwin_gfx.h"
+#include "app_uart_dwin_tx.h"
 #include "main.h"
 #include "stm32f4xx_hal.h"
 #include "cmsis_os.h"
 #include <string.h>
 
-extern UART_HandleTypeDef huart2;
-
 /* ---- Private TX buffer (separate from txbuf[] in hmi.c) --------------- */
 #define GFX_BUF_SIZE  32U
 static uint8_t s_gfx_buf[GFX_BUF_SIZE];
 
-/* ---- Safe IT-based send: wait for previous TX to finish --------------- */
+/* ---- Safe IT-based send via shared DWIN TX transport ------------------ */
 static void gfx_send(uint8_t len)
 {
-    /* Wait up to 200 ms for huart2 TX to become idle.
-     * osDelay yields to other tasks — no CPU spin-waste. */
-    for (uint8_t r = 0; r < 20U; r++) {
-        if (huart2.gState == HAL_UART_STATE_READY) break;
-        osDelay(10);
-    }
-    HAL_UART_Transmit_IT(&huart2, s_gfx_buf, len);
+    dwin_tx_send(s_gfx_buf, len);
 }
 
 /* ---- Helpers ---------------------------------------------------------- */
