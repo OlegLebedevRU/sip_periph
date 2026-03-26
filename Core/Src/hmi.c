@@ -57,16 +57,42 @@ uint8_t hmi_autodelete_sec = HMI_AUTODELETE_SEC_DEFAULT;
 #define HMI_MSG_IDLE_WAIT_MS    100U
 #define HMI_AUTH_PAGE_RETURN_MS 5000U  /* 5 seconds on auth page before return */
 #define HMI_DIAG_LINE_COUNT_EXT (app_i2c_slave_diag_line_count() + 1U)  /* +1 for time line */
+#define DWIN_CONSOLE_VP_ADDR   0x6000U
+#define DWIN_CONSOLE_LINES     15U
+#define DWIN_CONSOLE_TEXT_LEN  32U                  /* visible chars per row           */
+#define DWIN_CONSOLE_MAX_TASKS 16U                  /* max tasks queried for watermark */
+#define DWIN_CONSOLE_EOL_LEN    2U                  /* \r\n                            */
+#define DWIN_CONSOLE_ROW_LEN   (DWIN_CONSOLE_TEXT_LEN + DWIN_CONSOLE_EOL_LEN)  /* 34  */
+#define DWIN_CONSOLE_BUF_LEN   (DWIN_CONSOLE_LINES * DWIN_CONSOLE_ROW_LEN + 2U) /* +2 for 0xFFFF terminator */
+/* Max payload per dwin_text_output call: DWIN_TX_BUF_SIZE(256) - 6 = 250 bytes.
+ * We send 7 rows per chunk = 7*34 = 238 bytes < 250. */
+#define DWIN_CONSOLE_CHUNK_ROWS   7U
+#define DWIN_CONSOLE_CHUNK_BYTES  (DWIN_CONSOLE_CHUNK_ROWS * DWIN_CONSOLE_ROW_LEN)
+#define DWIN_CONSOLE_PACE_MS      30U   /* inter-chunk delay so DWIN can absorb data */
 
 /* ---- Magic code detection state ---- */
 #define MAGIC_SEQ_LEN     3U
 static const uint8_t s_magic_seq[MAGIC_SEQ_LEN] = { '1', '0', '1' };  /* then '*' triggers */
+static const uint8_t s_magic2_seq[MAGIC_SEQ_LEN] = { '1', '0', '2' }; /* then '*' triggers page 2 */
 static uint8_t s_magic_pos = 0U;          /* how many of s_magic_seq matched so far */
+static uint8_t s_magic2_pos = 0U;         /* how many of s_magic2_seq matched so far */
 static volatile uint8_t s_diag_oneshot = 0U;   /* 1 = one full diag rotation requested */
 static uint8_t s_diag_oneshot_remaining = 0U;  /* lines left in current oneshot cycle */
 
+volatile uint8_t s_console_remain = 0U;
+
+void hmi_notify_1hz_tick(void) {
+    if (s_console_remain > 0U) {
+        s_console_remain--;
+    }
+}
+
 /* ---- Diag cancel: set by StartTaskHmi on '*' in idle, read by StartTaskHmiMsg ---- */
 static volatile uint8_t s_diag_cancel = 0U;
+
+/* ---- Console state ---- */
+static uint8_t s_console_line_idx = 0U;
+static char s_console_buf[DWIN_CONSOLE_BUF_LEN];  /* 15×34 + 2 = 512 bytes (rows + 0xFFFF term) */
 
 /* ---- Auth page return (tick-based, polled in StartTaskHmiMsg) ---- */
 static volatile uint32_t s_auth_page_return_tick = 0U;  /* 0 = inactive */
@@ -85,6 +111,11 @@ static uint8_t hmi_extract_input_code(const MsgUart_t *uart_msg, uint8_t *code);
 static void resetpinbuf(void);
 static void resetpindata(void);
 static void dwin_input_output(const uint8_t *text, size_t textlen);
+
+/* Forward declarations for console */
+static void hmi_update_console(void);
+static void hmi_console_reset_buffer(void);
+static void hmi_console_fill_all(void);
 
 static void hmi_raise_event(uint32_t event_mask)
 {
@@ -263,6 +294,10 @@ void StartTaskHmi(void const *argument) {
 	(void)argument;
 	dwin_tx_init();
 	osDelay(100);
+	/* Ensure DWIN starts on page 0 — it retains its page across STM32 resets,
+	 * so if a previous session left it on page 2 (console), input would be dead. */
+	dwin_gfx_page_switch(0);
+	osDelay(50);
 	resetpindata();
 	
 	/* Kick off the two-phase DWIN receive FSM (lives in HAL_UART_RxCpltCallback) */
@@ -293,22 +328,27 @@ void StartTaskHmi(void const *argument) {
 
 		/* ---- UNLOCKED: full input processing ---- */
 		if (code == HMI_CODE_CLEAR_ASCII || code == HMI_CODE_CLEAR_LEGACY) {
-			/* '*' / 240: check for magic code 101* before clearing */
+			/* '*' / 240: check for magic code before clearing */
 			if (s_magic_pos >= MAGIC_SEQ_LEN) {
 				/* Magic code 101* detected — enable one-shot diag rotation */
 				s_diag_oneshot = 1U;
 				s_diag_oneshot_remaining = HMI_DIAG_LINE_COUNT_EXT;
-				s_magic_pos = 0U;
+			} else if (s_magic2_pos >= MAGIC_SEQ_LEN) {
+				/* Magic code 102* detected — set flag, page switch in StartTaskHmiMsg */
+				s_console_line_idx = 0U;
+				s_console_remain = 60U;
 			} else if (pin.bitlength == 0U) {
 				/* '*' in idle — cancel active diag rotation */
 				s_diag_cancel = 1U;
 			}
 			resetpindata();
 			s_magic_pos = 0U;
+			s_magic2_pos = 0U;
 		}
 		else if (code == HMI_CODE_END_ASCII || code == HMI_CODE_END_LEGACY) {
 			/* '#' / 241: submit PIN to ESP */
 			s_magic_pos = 0U;
+			s_magic2_pos = 0U;
 			uint8_t saved_len = pin.bitlength;   /* save BEFORE reset */
 			if (saved_len > 0U) {
 				/* Snapshot pin into a stable buffer BEFORE resetpindata()
@@ -345,6 +385,13 @@ void StartTaskHmi(void const *argument) {
 			} else {
 				s_magic_pos = (code == s_magic_seq[0]) ? 1U : 0U;
 			}
+			
+			/* Track magic sequence 1-0-2 */
+			if (s_magic2_pos < MAGIC_SEQ_LEN && code == s_magic2_seq[s_magic2_pos]) {
+				s_magic2_pos++;
+			} else {
+				s_magic2_pos = (code == s_magic2_seq[0]) ? 1U : 0U;
+			}
 
 			/* Update display */
 			dwin_input_output(&pin.rdata[0], pin.bitlength + 1U);
@@ -352,6 +399,7 @@ void StartTaskHmi(void const *argument) {
 		else {
 			/* Buffer overflow — clear */
 			s_magic_pos = 0U;
+			s_magic2_pos = 0U;
 			resetpindata();
 		}
 
@@ -394,9 +442,44 @@ void StartTaskHmiMsg(void const *argument) {
 	char diag_buf[HMI_DIAG_TEXT_SIZE];
 	uint8_t was_diag = 0U;           /* previous iteration was diag mode */
 	uint32_t diag_err_snapshot = 0U; /* last known error sum — rotation starts on change */
+	
+	uint8_t was_console = 0U;
+	uint8_t last_console_remain = 0U;
+	static uint32_t diag_tick = 0U;
+	static uint32_t time_tick = 0U;
 
 	for (;;) {
 		hmi_process_message_events();
+
+		/* ---- Console page return and update ---- */
+		if (s_console_remain > 0U) {
+			if (was_console == 0U) {
+				/* Console just activated — fill all rows once, flush once, switch page */
+				was_console = 1U;
+				last_console_remain = s_console_remain;
+				s_console_line_idx = 0U;
+				hmi_console_reset_buffer();
+				hmi_console_fill_all();
+				dwin_gfx_page_switch(2U);
+			} else if (s_console_remain != last_console_remain) {
+				/* Console tick — update one line */
+				last_console_remain = s_console_remain;
+				hmi_update_console();
+			}
+		} else if (was_console != 0U) {
+			was_console = 0U;
+			last_console_remain = 0U;
+			/* Write 0xFFFF terminator to console base VP so DWIN clears
+			 * the text widget before we leave the page. */
+			{
+				const uint8_t term[2] = { 0xFF, 0xFF };
+				dwin_text_output(DWIN_CONSOLE_VP_ADDR, term, sizeof(term));
+			}
+			osDelay(DWIN_CONSOLE_PACE_MS);  /* let UART+DWIN finish */
+			dwin_gfx_page_switch(0);
+			/* Force immediate clock redraw after returning from console */
+			time_tick = 0U;
+		}
 
 		/* ---- Auth page return: poll tick-based deadline ---- */
 		if (s_auth_page_return_tick != 0U) {
@@ -427,12 +510,14 @@ void StartTaskHmiMsg(void const *argument) {
 				dwin_input_output(&msg_hmi.msg_buf[0], msg_hmi.psize);
 			}
 		} else {
-			static uint32_t diag_tick = 0U;
-			static uint32_t time_tick = 0U;
 			uint32_t now = HAL_GetTick();
 
 			/* Skip idle display if user is typing or auth page is showing */
 			if (pin.bitlength > 0U || s_auth_result_display_active != 0U) {
+				continue;
+			}
+			
+			if (was_console != 0U) { /* Skip diag/clock if console is active */
 				continue;
 			}
 
@@ -547,4 +632,223 @@ void cb_Hmi_Ttl(void const *argument) {
 	(void)argument;
 	/* Defer HMI TTL clear handling to StartTaskHmiMsg task context */
 	hmi_raise_event(HMI_EVT_MSG_TTL);
+}
+
+/* ---- Console Output ----------------------------------------------------- */
+
+/* Send total_bytes from s_console_buf to DWIN in safe-sized chunks.
+ * Chunks are sent in REVERSE order (highest VP first, base VP 0x6000 last)
+ * because DWIN text widgets refresh on a write to their base VP address.
+ * Writing the base address last ensures all data is in place before render. */
+static void hmi_console_flush(uint16_t total_bytes)
+{
+    /* Calculate number of chunks */
+    uint16_t n_chunks = (total_bytes + DWIN_CONSOLE_CHUNK_BYTES - 1U)
+                      / DWIN_CONSOLE_CHUNK_BYTES;
+    if (n_chunks == 0U) return;
+
+    /* Send from last chunk to first (base VP last triggers DWIN render).
+     * Pace with osDelay between chunks so DWIN can absorb each one. */
+    for (uint16_t ci = n_chunks; ci > 0U; ci--) {
+        uint16_t idx = ci - 1U;
+        uint16_t offset = idx * DWIN_CONSOLE_CHUNK_BYTES;
+        uint16_t remain = total_bytes - offset;
+        uint16_t chunk = (remain > DWIN_CONSOLE_CHUNK_BYTES)
+                       ? DWIN_CONSOLE_CHUNK_BYTES : remain;
+        uint16_t word_off = offset / 2U;
+        uint16_t addr = (uint16_t)(DWIN_CONSOLE_VP_ADDR + word_off);
+        dwin_text_output(addr, (uint8_t*)&s_console_buf[offset], chunk);
+
+        /* Pace: give DWIN time to process before sending next chunk */
+        if (ci > 1U) {
+            osDelay(DWIN_CONSOLE_PACE_MS);
+        }
+    }
+}
+
+/* Send the entire buffer (all 15 rows + 0xFF terminator) to DWIN. */
+static void hmi_console_flush_all(void)
+{
+    hmi_console_flush((uint16_t)sizeof(s_console_buf));
+}
+
+/* Pre-fill RAM buffer with spaces+CRLF and 0xFF terminator (no DWIN write). */
+static void hmi_console_reset_buffer(void)
+{
+    for (uint8_t i = 0U; i < DWIN_CONSOLE_LINES; i++) {
+        size_t base = (size_t)i * DWIN_CONSOLE_ROW_LEN;
+        memset(&s_console_buf[base], ' ', DWIN_CONSOLE_TEXT_LEN);
+        s_console_buf[base + DWIN_CONSOLE_TEXT_LEN + 0U] = '\r';
+        s_console_buf[base + DWIN_CONSOLE_TEXT_LEN + 1U] = '\n';
+    }
+    s_console_buf[DWIN_CONSOLE_LINES * DWIN_CONSOLE_ROW_LEN + 0U] = (char)0xFF;
+    s_console_buf[DWIN_CONSOLE_LINES * DWIN_CONSOLE_ROW_LEN + 1U] = (char)0xFF;
+}
+
+/* Format one row into s_console_buf at position row_idx (no DWIN send).
+ *
+ * Row map (15 lines):
+ *  0  HEADER            7  I2C RELISTEN
+ *  1  UPTIME / LEFT     8  I2C STUCK SCL
+ *  2  HEAP FREE         9  I2C RECOVERED
+ *  3  HEAP MIN FREE    10  NO PROGRESS s
+ *  4  LIBC HEAP USED   11  TOP-1 task (min watermark)
+ *  5  MSP USED/SIZE    12  TOP-2 task
+ *  6  .BSS+.DATA       13  TOP-3 task
+ *                      14  RTC
+ */
+static void hmi_console_format_row(uint8_t row_idx)
+{
+    const app_i2c_slave_diag_t *d = app_i2c_slave_get_diag();
+    const char *rtc = service_time_sync_get_datetime_str();
+    uint32_t uptime = HAL_GetTick() / 1000U;
+    uint32_t h = uptime / 3600U;
+    uint32_t m = (uptime % 3600U) / 60U;
+    uint32_t s = uptime % 60U;
+    uint32_t since_progress = 0U;
+    int written = 0;
+    char tmp[DWIN_CONSOLE_TEXT_LEN + 1U];
+
+    if (h > 999U) h = 999U;
+    if (d->last_progress_tick != 0U) {
+        uint32_t now = HAL_GetTick();
+        if (now >= d->last_progress_tick)
+            since_progress = (now - d->last_progress_tick) / 1000U;
+    }
+    if (rtc == NULL || rtc[0] == '\0')
+        rtc = "--.--.-- --:--:--";
+
+    /* ---- Rows 11-13: top-3 heaviest tasks (lowest stack watermark) ---- */
+    if (row_idx >= 11U && row_idx <= 13U) {
+        TaskStatus_t task_arr[DWIN_CONSOLE_MAX_TASKS];
+        UBaseType_t n_tasks = uxTaskGetSystemState(task_arr, DWIN_CONSOLE_MAX_TASKS, NULL);
+
+        uint8_t rank = row_idx - 11U;  /* 0, 1, or 2 */
+        const char *name = "---";
+        uint32_t wm = 0U;
+        for (uint8_t r = 0U; r <= rank; r++) {
+            uint16_t min_wm = 0xFFFFU;
+            UBaseType_t min_idx = 0U;
+            uint8_t found = 0U;
+            for (UBaseType_t i = 0U; i < n_tasks; i++) {
+                if (task_arr[i].usStackHighWaterMark < min_wm) {
+                    min_wm = task_arr[i].usStackHighWaterMark;
+                    min_idx = i;
+                    found = 1U;
+                }
+            }
+            if (found) {
+                if (r == rank) {
+                    name = task_arr[min_idx].pcTaskName;
+                    wm = (uint32_t)task_arr[min_idx].usStackHighWaterMark;
+                }
+                task_arr[min_idx].usStackHighWaterMark = 0xFFFFU;
+            }
+        }
+        /* watermark is in StackType_t words (4 bytes on CM4) */
+        written = snprintf(tmp, sizeof(tmp), "%-16s stk%5lu", name, wm * 4UL);
+    } else {
+        switch (row_idx) {
+        case 0:
+            written = snprintf(tmp, sizeof(tmp), "=== SYSTEM DIAG PAGE 2 ===");
+            break;
+        case 1:
+            written = snprintf(tmp, sizeof(tmp), "UP %03lu:%02lu:%02lu   LEFT %02lu",
+                               h, m, s, (uint32_t)s_console_remain);
+            break;
+        case 2:
+            written = snprintf(tmp, sizeof(tmp), "HEAP FREE      %10u",
+                               (unsigned)xPortGetFreeHeapSize());
+            break;
+        case 3:
+            written = snprintf(tmp, sizeof(tmp), "HEAP MIN FREE  %10u",
+                               (unsigned)xPortGetMinimumEverFreeHeapSize());
+            break;
+        case 4: {
+            /* libc heap used: current sbrk() watermark minus _end */
+            extern uint8_t _end;           /* linker symbol: end of .bss */
+            extern void *_sbrk(ptrdiff_t); /* sysmem.c */
+            uint8_t *brk = (uint8_t *)_sbrk(0);
+            uint32_t libc_used = (brk > &_end) ? (uint32_t)(brk - &_end) : 0U;
+            written = snprintf(tmp, sizeof(tmp), "LIBC HEAP USED %10lu", libc_used);
+            break;
+        }
+        case 5: {
+            /* MSP usage: _estack (top) minus current MSP value */
+            extern uint8_t _estack;        /* linker: top of RAM = MSP initial */
+            extern uint32_t _Min_Stack_Size; /* linker: reserved MSP area */
+            uint32_t msp_top  = (uint32_t)&_estack;
+            uint32_t msp_size = (uint32_t)&_Min_Stack_Size;  /* value IS the size */
+            uint32_t msp_cur  = __get_MSP();
+            uint32_t msp_used = (msp_top > msp_cur) ? (msp_top - msp_cur) : 0U;
+            written = snprintf(tmp, sizeof(tmp), "MSP %5lu / %5lu B",
+                               msp_used, msp_size);
+            break;
+        }
+        case 6: {
+            /* .bss + .data size (global/static variables footprint) */
+            extern uint8_t _sdata, _edata; /* linker: .data boundaries */
+            extern uint8_t _sbss, _ebss;   /* linker: .bss boundaries */
+            uint32_t data_sz = (uint32_t)(&_edata - &_sdata);
+            uint32_t bss_sz  = (uint32_t)(&_ebss  - &_sbss);
+            written = snprintf(tmp, sizeof(tmp), ".BSS+.DATA     %10lu",
+                               data_sz + bss_sz);
+            break;
+        }
+        case 7:
+            written = snprintf(tmp, sizeof(tmp), "I2C RELISTEN   %10lu",
+                               d->relisten_count);
+            break;
+        case 8:
+            written = snprintf(tmp, sizeof(tmp), "I2C STUCK SCL  %10lu",
+                               d->stuck_scl_count);
+            break;
+        case 9:
+            written = snprintf(tmp, sizeof(tmp), "I2C RECOVERED  %10lu",
+                               d->hard_recover_count);
+            break;
+        case 10:
+            written = snprintf(tmp, sizeof(tmp), "NO PROGRESS s  %10lu",
+                               since_progress);
+            break;
+        /* rows 11-13 handled above (top-3 tasks) */
+        case 14:
+            written = snprintf(tmp, sizeof(tmp), "RTC %-28s", rtc);
+            break;
+        default:
+            return;
+        }
+    }
+
+    if (written < 0) written = 0;
+    if ((size_t)written > DWIN_CONSOLE_TEXT_LEN) written = (int)DWIN_CONSOLE_TEXT_LEN;
+
+    char *row = &s_console_buf[(size_t)row_idx * DWIN_CONSOLE_ROW_LEN];
+    memcpy(row, tmp, (size_t)written);
+    if ((size_t)written < DWIN_CONSOLE_TEXT_LEN) {
+        memset(&row[written], ' ', DWIN_CONSOLE_TEXT_LEN - (size_t)written);
+    }
+    row[DWIN_CONSOLE_TEXT_LEN + 0U] = '\r';
+    row[DWIN_CONSOLE_TEXT_LEN + 1U] = '\n';
+}
+
+/* Fill all 15 rows into the buffer and send to DWIN once. */
+static void hmi_console_fill_all(void)
+{
+    for (uint8_t r = 0U; r < DWIN_CONSOLE_LINES; r++) {
+        hmi_console_format_row(r);
+    }
+    /* 0xFF terminator is already at the end from reset_buffer */
+    hmi_console_flush_all();
+}
+
+/* Update one row (round-robin) and send to DWIN. */
+static void hmi_update_console(void) {
+    hmi_console_format_row(s_console_line_idx);
+    hmi_console_flush_all();
+
+    s_console_line_idx++;
+    if (s_console_line_idx >= DWIN_CONSOLE_LINES) {
+        s_console_line_idx = 0U;
+    }
 }

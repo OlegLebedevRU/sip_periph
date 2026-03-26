@@ -42,10 +42,9 @@ void StartTaskOLED(void const *argument)
 		xQueueReceive(myQueueOLEDHandle, &sig1, osWaitForever);
 		char o2[16] = { 0 };
 		const struct keyb *kbd = service_matrix_kbd_get_state();
-		uint8_t *iram = app_i2c_slave_get_ram();
 		if (sig1 == 2) {
 			ssd1306_FillCircle(120, 7, 5, White);
-			service_time_sync_datetimepack(iram);
+			service_time_sync_datetimepack();
 			ssd1306_SetCursor(4, 4);
 			ssd1306_WriteString((char*) service_time_sync_get_datetime_str(), Font_6x8, White);
 		} else if (sig1 == 1) {

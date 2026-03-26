@@ -56,17 +56,19 @@ HAL_StatusTypeDef dwin_tx_send(const uint8_t *frame, uint16_t len)
         return HAL_ERROR;
     }
 
-    /* Copy frame into the internal buffer so caller's stack/local buffer
-     * can be reused immediately after this function returns. */
-    memcpy(s_tx_buf, frame, len);
-
-    /* Bounded wait for previous IT transmit to finish */
+    /* Bounded wait for previous IT transmit to finish BEFORE overwriting
+     * the shared buffer — HAL_UART_Transmit_IT reads from s_tx_buf in
+     * interrupt context, so we must not touch it while TX is in flight. */
     for (uint8_t r = 0U; r < DWIN_TX_WAIT_RETRIES; r++) {
         if (huart2.gState == HAL_UART_STATE_READY) {
             break;
         }
         osDelay(DWIN_TX_WAIT_DELAY_MS);
     }
+
+    /* Copy frame into the internal buffer so caller's stack/local buffer
+     * can be reused immediately after this function returns. */
+    memcpy(s_tx_buf, frame, len);
 
     rc = HAL_UART_Transmit_IT(&huart2, s_tx_buf, len);
 

@@ -39,7 +39,7 @@ void service_time_sync_init(void);
  * Читает DS3231, копирует в ram[0x60..0x66], ставит PACKET_TIME в очередь.
  * ram — указатель на app_i2c_slave_get_ram().
  */
-bool service_time_sync_on_tick(uint8_t *ram);
+bool service_time_sync_on_tick(void);
 
 /*
  * Обработать запрос синхронизации от мастера.
@@ -48,8 +48,7 @@ bool service_time_sync_on_tick(uint8_t *ram);
  * rx_count    — количество принятых байт (должно быть I2C_TIME_SYNC_WRITE_LEN).
  * ram         — указатель на app_i2c_slave_get_ram() для обновления ram[0x6x].
  */
-void service_time_sync_from_master(const uint8_t *master_bcd7, uint8_t rx_count,
-                                   uint8_t *ram);
+void service_time_sync_from_master(const uint8_t *master_bcd7, uint8_t rx_count);
 
 /*
  * Проверить валидность BCD пакета времени.
@@ -61,9 +60,8 @@ bool service_time_sync_validate_packet(const uint8_t *buf, uint8_t len);
  * Форматировать дату/время в строку "DD.MM.YY-HH:MM:SS" для OLED.
  * Результат записывается во внутренний буфер, доступный через
  * service_time_sync_get_datetime_str().
- * ram — указатель на app_i2c_slave_get_ram().
  */
-void service_time_sync_datetimepack(const uint8_t *ram);
+void service_time_sync_datetimepack(void);
 
 /*
  * Получить указатель на строку форматированного времени.

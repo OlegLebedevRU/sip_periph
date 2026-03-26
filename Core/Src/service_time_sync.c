@@ -15,8 +15,12 @@ extern I2C_HandleTypeDef hi2c2;
 extern osMessageQId myQueueToMasterHandle;
 extern osMutexId i2c2_MutexHandle;
 
+/* ---- call to HMI ------------------------------------------------------- */
+void hmi_notify_1hz_tick(void);
+
 /* ---- internal state ---------------------------------------------------- */
 static uint8_t s_hw_time[8] = {0};
+static uint8_t s_cached_time[8] = {0}; /* 0x60..0x66 equivalent */
 static char    s_date_time[19] = {0}; /* DD.MM.YY-HH:MM:SS\0 */
 
 /* ---- internal helpers -------------------------------------------------- */
@@ -140,16 +144,23 @@ bool service_time_sync_validate_packet(const uint8_t *buf, uint8_t len)
     return true;
 }
 
-bool service_time_sync_on_tick(uint8_t *ram)
+bool service_time_sync_on_tick(void)
 {
-    if (ram == NULL) {
-        return false;
-    }
+    /* 1Hz HMI tick must fire unconditionally — it drives the console
+     * countdown timer (s_console_remain).  Tying it to DS3231 success
+     * would freeze the console if the RTC bus is unhealthy. */
+    hmi_notify_1hz_tick();
+
     if (!ds3231_read_time(s_hw_time)) {
         return false;
     }
 
-    memcpy(&ram[0x60], s_hw_time, I2C_TIME_SYNC_WRITE_LEN);
+    memcpy(s_cached_time, s_hw_time, I2C_TIME_SYNC_WRITE_LEN);
+
+    /* Format the human-readable string immediately so that all consumers
+     * (HMI page0_time_widget, OLED, console) see up-to-date time without
+     * depending on a separate task to call datetimepack(). */
+    service_time_sync_datetimepack();
 
     {
         I2cPacketToMaster_t pckt = {
@@ -159,11 +170,13 @@ bool service_time_sync_on_tick(uint8_t *ram)
             .ttl     = 1000U,
         };
         xQueueSend(myQueueToMasterHandle, &pckt, 0);
+
+        return true;
     }
-    return true;
+    return false;
 }
 
-void service_time_sync_from_master(const uint8_t *master_bcd7, uint8_t rx_count, uint8_t *ram)
+void service_time_sync_from_master(const uint8_t *master_bcd7, uint8_t rx_count)
 {
     uint8_t rtc_time[I2C_TIME_SYNC_WRITE_LEN] = {0};
     uint32_t master_sec;
@@ -174,11 +187,9 @@ void service_time_sync_from_master(const uint8_t *master_bcd7, uint8_t rx_count,
         return;
     }
 
-    memcpy(&ram[I2C_REG_HW_TIME_SET_ADDR], master_bcd7, I2C_TIME_SYNC_WRITE_LEN);
-
     if (!ds3231_read_time(rtc_time) || !service_time_sync_validate_packet(rtc_time, I2C_TIME_SYNC_WRITE_LEN)) {
         (void)ds3231_write_time(master_bcd7);
-        memcpy(&ram[0x60], master_bcd7, I2C_TIME_SYNC_WRITE_LEN);
+        memcpy(s_cached_time, master_bcd7, I2C_TIME_SYNC_WRITE_LEN);
         return;
     }
 
@@ -188,45 +199,40 @@ void service_time_sync_from_master(const uint8_t *master_bcd7, uint8_t rx_count,
 
     if (delta > TIME_SYNC_DRIFT_SEC) {
         (void)ds3231_write_time(master_bcd7);
-        memcpy(&ram[0x60], master_bcd7, I2C_TIME_SYNC_WRITE_LEN);
+        memcpy(s_cached_time, master_bcd7, I2C_TIME_SYNC_WRITE_LEN);
     }
 }
 
-void service_time_sync_datetimepack(const uint8_t *ram)
+void service_time_sync_datetimepack(void)
 {
     uint8_t tmp1, tmp2, tmp3;
 
-    if (ram == NULL) {
-        s_date_time[0] = 0;
-        return;
-    }
-
-    tmp1 = bcd_to_dec(ram[0x64]);
+    tmp1 = bcd_to_dec(s_cached_time[4]); // 0x64 equivalent day
     s_date_time[0] = (char)(((tmp1 / 10U) % 10U) + '0');
     s_date_time[1] = (char)((tmp1 % 10U) + '0');
     s_date_time[2] = '.';
 
-    tmp2 = bcd_to_dec(ram[0x65]);
+    tmp2 = bcd_to_dec(s_cached_time[5]); // 0x65 equivalent month
     s_date_time[3] = (char)(((tmp2 / 10U) % 10U) + '0');
     s_date_time[4] = (char)((tmp2 % 10U) + '0');
     s_date_time[5] = '.';
 
-    tmp3 = bcd_to_dec(ram[0x66]);
+    tmp3 = bcd_to_dec(s_cached_time[6]); // 0x66 equivalent year
     s_date_time[6] = (char)(((tmp3 / 10U) % 10U) + '0');
     s_date_time[7] = (char)((tmp3 % 10U) + '0');
     s_date_time[8] = '-';
 
-    tmp1 = bcd_to_dec(ram[0x62]);
+    tmp1 = bcd_to_dec(s_cached_time[2]); // 0x62 equivalent hour
     s_date_time[9]  = (char)(((tmp1 / 10U) % 10U) + '0');
     s_date_time[10] = (char)((tmp1 % 10U) + '0');
     s_date_time[11] = ':';
 
-    tmp2 = bcd_to_dec(ram[0x61]);
+    tmp2 = bcd_to_dec(s_cached_time[1]); // 0x61 equivalent min
     s_date_time[12] = (char)(((tmp2 / 10U) % 10U) + '0');
     s_date_time[13] = (char)((tmp2 % 10U) + '0');
     s_date_time[14] = ':';
 
-    tmp3 = bcd_to_dec(ram[0x60]);
+    tmp3 = bcd_to_dec(s_cached_time[0]); // 0x60 equivalent sec
     s_date_time[15] = (char)(((tmp3 / 10U) % 10U) + '0');
     s_date_time[16] = (char)((tmp3 % 10U) + '0');
     s_date_time[17] = 0;

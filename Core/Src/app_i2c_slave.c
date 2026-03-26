@@ -558,9 +558,8 @@ static void process_deferred_actions(void)
 
     if (action & DEFERRED_TIME_SYNC) {
         service_time_sync_from_master(&s_ram[I2C_REG_HW_TIME_SET_ADDR],
-                                      I2C_TIME_SYNC_WRITE_LEN, s_ram);
-        service_time_sync_datetimepack(s_ram);
-        s_ram[0x6F] = 1U;
+                                      I2C_TIME_SYNC_WRITE_LEN);
+        service_time_sync_datetimepack();
     }
     if (action & DEFERRED_AUTH_RESULT) {
         process_auth_result_write();

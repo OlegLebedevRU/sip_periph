@@ -81,7 +81,7 @@ static void tca_handle_ds3231(uint8_t curr_inputs, uint32_t now)
         /* P0 LOW — активная фаза SQW 1Hz */
         if (s_ds_low_seen == 0U) {
             uint8_t *iram = app_i2c_slave_get_ram();
-            (void)service_time_sync_on_tick(iram);
+            (void)service_time_sync_on_tick();
             runtime_config_apply_from_ram(iram);
             s_ds_low_seen = 1U;
             s_ds_low_latched_at = now;

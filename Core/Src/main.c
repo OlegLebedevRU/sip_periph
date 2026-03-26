@@ -166,6 +166,16 @@ void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c) {
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 	app_uart_dwin_rx_callback(huart);
 }
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+	if (huart == &huart2) {
+		/* ORE (Overrun Error) kills the RX FSM — UART_EndRxTransfer() disables
+		 * RXNE interrupt and sets RxState = READY.  Restart the two-phase
+		 * DWIN receive FSM so input doesn't go permanently dead. */
+		__HAL_UART_CLEAR_OREFLAG(huart);
+		dwin_uart_start();
+	}
+}
 /* USER CODE END 0 */
 
 /**
@@ -352,7 +362,7 @@ int main(void)
   rtos_require_alloc(myTaskHmiHandle);
 
   /* definition and creation of myTaskHmiMsg */
-  osThreadDef(myTaskHmiMsg, StartTaskHmiMsg, osPriorityIdle, 0, 256);
+  osThreadDef(myTaskHmiMsg, StartTaskHmiMsg, osPriorityIdle, 0, 512);
   myTaskHmiMsgHandle = osThreadCreate(osThread(myTaskHmiMsg), NULL);
   rtos_require_alloc(myTaskHmiMsgHandle);
 
