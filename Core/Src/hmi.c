@@ -13,6 +13,8 @@
 #include "app_uart_dwin.h"
 #include "app_uart_dwin_tx.h"
 #include "app_i2c_slave.h"
+#include "dwin_gfx.h"
+#include "service_time_sync.h"
 
 extern osMessageQId myQueueHMIRecvRawHandle, myQueueToMasterHandle,
 		myQueueHmiMsgHandle;
@@ -38,22 +40,51 @@ uint8_t hmi_autodelete_sec = HMI_AUTODELETE_SEC_DEFAULT;
 #define HMI_CODE_END_LEGACY     241
 #define HMI_CODE_CLEAR_LEGACY   240
 #define DWIN_TEXT_VP_ADDR       0x5200U
+#define DWIN_INPUT_FIELD_LEN   (CARDNUMLENGTH * 2)  /* page0_input_widget VP buffer = 16 bytes */
+#define DWIN_TIMER_VP_ADDR     0x5230U  /* page0_time_widget — time & diag */
 #define DWIN_HDR_SIZE_LOCAL     3U
 #define DWIN_MIN_KEY_PKT_SIZE   9U
 #define DWIN_CMD_VP_READ        0x83U
 #define HMI_TX_FRAME_OVERHEAD   6U
-#define HMI_DIAG_TEXT_SIZE      12U
+#define HMI_DIAG_TEXT_SIZE      26U
 #define HMI_MSG_BUF_SIZE        (sizeof(msg_hmi.msg_buf))
 #define HMI_MAX_MSG_PSIZE       (HMI_MSG_BUF_SIZE - 1U)
 #define HMI_EVT_NONE            0x00000000UL
 #define HMI_EVT_PIN_TIMEOUT     0x00000001UL
 #define HMI_EVT_MSG_TTL         0x00000002UL
+#define HMI_EVT_AUTH_PAGE_RET   0x00000004UL  /* return from auth page to page 0 */
 #define HMI_RX_IDLE_WAIT_MS     50U
 #define HMI_MSG_IDLE_WAIT_MS    100U
+#define HMI_AUTH_PAGE_RETURN_MS 5000U  /* 5 seconds on auth page before return */
+#define HMI_DIAG_LINE_COUNT_EXT (app_i2c_slave_diag_line_count() + 1U)  /* +1 for time line */
+
+/* ---- Magic code detection state ---- */
+#define MAGIC_SEQ_LEN     3U
+static const uint8_t s_magic_seq[MAGIC_SEQ_LEN] = { '1', '0', '1' };  /* then '*' triggers */
+static uint8_t s_magic_pos = 0U;          /* how many of s_magic_seq matched so far */
+static volatile uint8_t s_diag_oneshot = 0U;   /* 1 = one full diag rotation requested */
+static uint8_t s_diag_oneshot_remaining = 0U;  /* lines left in current oneshot cycle */
+
+/* ---- Diag cancel: set by StartTaskHmi on '*' in idle, read by StartTaskHmiMsg ---- */
+static volatile uint8_t s_diag_cancel = 0U;
+
+/* ---- Auth page return (tick-based, polled in StartTaskHmiMsg) ---- */
+static volatile uint32_t s_auth_page_return_tick = 0U;  /* 0 = inactive */
+
+/* ---- Diag error sum for change detection ---- */
+static uint32_t hmi_diag_error_sum(void)
+{
+	const app_i2c_slave_diag_t *d = app_i2c_slave_get_diag();
+	return d->progress_timeout_count + d->stuck_scl_count
+	     + d->stuck_sda_count + d->abort_count
+	     + d->hard_recover_count + d->malformed_count
+	     + d->recover_fail_count;
+}
 
 static uint8_t hmi_extract_input_code(const MsgUart_t *uart_msg, uint8_t *code);
 static void resetpinbuf(void);
 static void resetpindata(void);
+static void dwin_input_output(const uint8_t *text, size_t textlen);
 
 static void hmi_raise_event(uint32_t event_mask)
 {
@@ -94,7 +125,7 @@ static void hmi_reset_msg_state(void)
 static void hmi_clear_display_if_unlocked(void)
 {
 	if (msg_hmi.hmi_lock == UNLOCKED) {
-		dwin_text_output(DWIN_TEXT_VP_ADDR, &pin.rdata[0], sizeof(pin.rdata));
+		dwin_input_output(&pin.rdata[0], sizeof(pin.rdata));
 	}
 }
 
@@ -136,8 +167,12 @@ static void hmi_process_message_events(void)
 {
 	if ((hmi_take_events(HMI_EVT_MSG_TTL) & HMI_EVT_MSG_TTL) != 0U) {
 		hmi_reset_msg_state();
-		s_auth_result_display_active = 0U;
-		dwin_text_output(DWIN_TEXT_VP_ADDR, &msg_hmi.msg_buf[0], sizeof(msg_hmi.msg_buf));
+		/* Only clear auth display flag if auth page return is not pending;
+		 * the page-return poll is the authoritative mechanism. */
+		if (s_auth_page_return_tick == 0U) {
+			s_auth_result_display_active = 0U;
+		}
+		dwin_input_output(&msg_hmi.msg_buf[0], sizeof(msg_hmi.msg_buf));
 	}
 }
 
@@ -184,6 +219,21 @@ void dwin_text_output(const uint16_t inaddr, const uint8_t *text_to_hmi,
 	dwin_tx_send(frame, (uint16_t)(len + HMI_TX_FRAME_OVERHEAD));
 }
 
+/* Fixed-width output to page0_input_widget — pads with 0xFF to prevent
+ * DWIN from displaying leftover bytes in VP 0x5200 buffer. */
+static void dwin_input_output(const uint8_t *text, size_t textlen)
+{
+	uint8_t buf[DWIN_INPUT_FIELD_LEN];
+	memset(buf, 0xFF, DWIN_INPUT_FIELD_LEN);
+	if (textlen > DWIN_INPUT_FIELD_LEN) {
+		textlen = DWIN_INPUT_FIELD_LEN;
+	}
+	if (text != NULL && textlen > 0U) {
+		memcpy(buf, text, textlen);
+	}
+	dwin_text_output(DWIN_TEXT_VP_ADDR, buf, DWIN_INPUT_FIELD_LEN);
+}
+
 static void resetpinbuf(void) {
 	/* Reset PIN buffer and state only — does NOT touch the display */
 	hmi_reset_pin_state();
@@ -198,19 +248,14 @@ static void resetpindata(void) {
 
 void hmi_show_auth_result(uint8_t auth_result)
 {
-	char auth_buf[12];
-	int written = snprintf(auth_buf, sizeof(auth_buf), "%u", (unsigned int)auth_result);
-	if (written <= 0) {
-		return;
+	/* AUTH=1 (access granted): switch DWIN to page 1, schedule return to page 0.
+	 * Other auth values: no HMI output (relay/buzzer handled by caller). */
+	if (auth_result == 0x01U) {
+		s_auth_result_display_active = 1U;
+		osTimerStart(myTimerHmiTtlHandle, HMI_AUTH_PAGE_RETURN_MS);
+		dwin_gfx_page_switch(1);
+		s_auth_page_return_tick = HAL_GetTick() + HMI_AUTH_PAGE_RETURN_MS;
 	}
-	if ((size_t)written >= sizeof(auth_buf)) {
-		written = (int)(sizeof(auth_buf) - 1U);
-		auth_buf[written] = '\0';
-	}
-	msg_hmi.hmi_lock = UNLOCKED;
-	s_auth_result_display_active = 1U;
-	osTimerStart(myTimerHmiTtlHandle, hmi_autodelete_sec * 1000U);
-	dwin_text_output(DWIN_TEXT_VP_ADDR, (const uint8_t *)auth_buf, (size_t)written);
 }
 
 void StartTaskHmi(void const *argument) {
@@ -248,11 +293,22 @@ void StartTaskHmi(void const *argument) {
 
 		/* ---- UNLOCKED: full input processing ---- */
 		if (code == HMI_CODE_CLEAR_ASCII || code == HMI_CODE_CLEAR_LEGACY) {
-			/* '*' / 240: clear buffer and display */
+			/* '*' / 240: check for magic code 101* before clearing */
+			if (s_magic_pos >= MAGIC_SEQ_LEN) {
+				/* Magic code 101* detected — enable one-shot diag rotation */
+				s_diag_oneshot = 1U;
+				s_diag_oneshot_remaining = HMI_DIAG_LINE_COUNT_EXT;
+				s_magic_pos = 0U;
+			} else if (pin.bitlength == 0U) {
+				/* '*' in idle — cancel active diag rotation */
+				s_diag_cancel = 1U;
+			}
 			resetpindata();
+			s_magic_pos = 0U;
 		}
 		else if (code == HMI_CODE_END_ASCII || code == HMI_CODE_END_LEGACY) {
 			/* '#' / 241: submit PIN to ESP */
+			s_magic_pos = 0U;
 			uint8_t saved_len = pin.bitlength;   /* save BEFORE reset */
 			if (saved_len > 0U) {
 				/* Snapshot pin into a stable buffer BEFORE resetpindata()
@@ -283,17 +339,50 @@ void StartTaskHmi(void const *argument) {
 			pin.bitlength++;
 			hmi_start_input_timeout((uint32_t)input_interval_sec * 1000U);
 
+			/* Track magic sequence 1-0-1 */
+			if (s_magic_pos < MAGIC_SEQ_LEN && code == s_magic_seq[s_magic_pos]) {
+				s_magic_pos++;
+			} else {
+				s_magic_pos = (code == s_magic_seq[0]) ? 1U : 0U;
+			}
+
 			/* Update display */
-			dwin_text_output(DWIN_TEXT_VP_ADDR, &pin.rdata[0], pin.bitlength + 1U);
+			dwin_input_output(&pin.rdata[0], pin.bitlength + 1U);
 		}
 		else {
 			/* Buffer overflow — clear */
+			s_magic_pos = 0U;
 			resetpindata();
 		}
 
 		dwin_buf_free(uart_msg.uart_buf);   /* пул вместо free() */
 	}
 }
+/* Fixed-width output to page0_timer_widget — pads with spaces to prevent
+ * garbage tail when shorter text follows longer text on same VP.
+ * DWIN stores and displays the full VP buffer, so we must clear it all. */
+#define DWIN_TIMER_FIELD_LEN  12U   /* page0_time_widget visible area = 12 chars */
+static void dwin_timer_output(const char *text, size_t textlen)
+{
+	uint8_t buf[DWIN_TIMER_FIELD_LEN];
+	if (textlen > DWIN_TIMER_FIELD_LEN) {
+		textlen = DWIN_TIMER_FIELD_LEN;
+	}
+	memcpy(buf, text, textlen);
+	if (textlen < DWIN_TIMER_FIELD_LEN) {
+		memset(&buf[textlen], ' ', DWIN_TIMER_FIELD_LEN - textlen);
+	}
+	dwin_text_output(DWIN_TIMER_VP_ADDR, buf, DWIN_TIMER_FIELD_LEN);
+}
+
+/* Clear the entire timer VP with spaces */
+static void dwin_timer_clear(void)
+{
+	uint8_t buf[DWIN_TIMER_FIELD_LEN];
+	memset(buf, ' ', DWIN_TIMER_FIELD_LEN);
+	dwin_text_output(DWIN_TIMER_VP_ADDR, buf, DWIN_TIMER_FIELD_LEN);
+}
+
 void StartTaskHmiMsg(void const *argument) {
 	(void)argument;
 	hmi_reset_msg_state();
@@ -301,11 +390,24 @@ void StartTaskHmiMsg(void const *argument) {
 	resetpinbuf();
 
 	uint8_t diag_index = 0U;
-	const uint8_t diag_count = app_i2c_slave_diag_line_count();
+	const uint8_t diag_hw_count = app_i2c_slave_diag_line_count();
 	char diag_buf[HMI_DIAG_TEXT_SIZE];
+	uint8_t was_diag = 0U;           /* previous iteration was diag mode */
+	uint32_t diag_err_snapshot = 0U; /* last known error sum — rotation starts on change */
 
 	for (;;) {
 		hmi_process_message_events();
+
+		/* ---- Auth page return: poll tick-based deadline ---- */
+		if (s_auth_page_return_tick != 0U) {
+			uint32_t now_ap = HAL_GetTick();
+			if ((int32_t)(now_ap - s_auth_page_return_tick) >= 0) {
+				s_auth_page_return_tick = 0U;
+				s_auth_result_display_active = 0U;
+				dwin_gfx_page_switch(0);
+			}
+		}
+
 		if (msg_hmi.hmi_lock == LOCKED) {
 			resetpinbuf();
 			osDelay(10);
@@ -322,30 +424,114 @@ void StartTaskHmiMsg(void const *argument) {
 			/* Got a real message from queue — display it */
 			osTimerStart(myTimerHmiTtlHandle, (uint32_t)msg_hmi.msg_ttl * 1000U);
 			if (msg_hmi.psize > 0U && msg_hmi.psize <= HMI_MAX_MSG_PSIZE) {
-				dwin_text_output(DWIN_TEXT_VP_ADDR, &msg_hmi.msg_buf[0], msg_hmi.psize);
+				dwin_input_output(&msg_hmi.msg_buf[0], msg_hmi.psize);
 			}
 		} else {
 			static uint32_t diag_tick = 0U;
+			static uint32_t time_tick = 0U;
 			uint32_t now = HAL_GetTick();
-			if ((now - diag_tick) < 2000U) {
+
+			/* Skip idle display if user is typing or auth page is showing */
+			if (pin.bitlength > 0U || s_auth_result_display_active != 0U) {
 				continue;
 			}
-			diag_tick = now;
-			/* Timeout — idle mode. If user is typing (pin buffer active), skip diag display */
-			if (pin.bitlength > 0U) {
+
+			/* ---- Handle diag cancel from '*' in idle ---- */
+			if (s_diag_cancel != 0U) {
+				s_diag_cancel = 0U;
+				s_diag_oneshot = 0U;
+				s_diag_oneshot_remaining = 0U;
+				diag_index = 0U;
+				/* Snapshot current sum so rotation doesn't restart immediately */
+				diag_err_snapshot = hmi_diag_error_sum();
+				/* Transition diag → clock: clear VP then force immediate clock update */
+				dwin_timer_clear();
+				was_diag = 0U;
+				time_tick = 0U;  /* force clock redraw on next iteration */
 				continue;
 			}
-			if (s_auth_result_display_active != 0U) {
-				continue;
+
+			/* Determine if diag should be active:
+			 *   - error counters changed since last snapshot
+			 *   - oneshot was triggered by magic 101* */
+			uint32_t err_sum = hmi_diag_error_sum();
+			uint8_t want_diag = 0U;
+			if (err_sum != diag_err_snapshot) {
+				want_diag = 1U;
 			}
-			/* Rotate diag error lines on HMI if any errors exist */
-			if (app_i2c_slave_has_errors()) {
-				app_i2c_slave_format_diag_line(diag_index, diag_buf, sizeof(diag_buf));
-				dwin_text_output(DWIN_TEXT_VP_ADDR, (const uint8_t *)diag_buf, strlen(diag_buf));
-				if (diag_count > 0U) {
+			if (s_diag_oneshot != 0U && s_diag_oneshot_remaining > 0U) {
+				want_diag = 1U;
+			}
+
+			if (want_diag) {
+				/* ---- Transition clock → diag: clear VP first ---- */
+				if (was_diag == 0U) {
+					dwin_timer_clear();
+					was_diag = 1U;
+					diag_index = 0U;
+					diag_tick = 0U;  /* force first line immediately */
+				}
+
+				/* ---- Diagnostics rotation (every 2s) ---- */
+				if ((now - diag_tick) >= 2000U) {
+					diag_tick = now;
+					uint8_t total_lines = diag_hw_count + 1U; /* +1 for time line */
+
+					if (diag_index < diag_hw_count) {
+						/* Hardware diag counter lines */
+						app_i2c_slave_format_diag_line(diag_index, diag_buf, sizeof(diag_buf));
+					} else {
+						/* Last line: current time (HH:MM:SS only) */
+						const char *ts = service_time_sync_get_datetime_str();
+						if (ts != NULL && ts[0] != '\0') {
+							size_t tslen = strlen(ts);
+							const char *hms = (tslen > 9U) ? &ts[9] : ts;
+							size_t hmslen = (tslen > 9U) ? (tslen - 9U) : tslen;
+							if (hmslen >= sizeof(diag_buf)) hmslen = sizeof(diag_buf) - 1U;
+							memcpy(diag_buf, hms, hmslen);
+							diag_buf[hmslen] = '\0';
+						} else {
+							snprintf(diag_buf, sizeof(diag_buf), "--:--:--");
+						}
+					}
+					/* Output diag to page0_timer_widget with fixed-width padding */
+					dwin_timer_output(diag_buf, strlen(diag_buf));
+
 					diag_index++;
-					if (diag_index >= diag_count) {
+					if (diag_index >= total_lines) {
 						diag_index = 0U;
+						/* Update snapshot — if no new errors, rotation stops next cycle */
+						diag_err_snapshot = err_sum;
+						/* If oneshot mode, complete the cycle */
+						if (s_diag_oneshot != 0U) {
+							s_diag_oneshot = 0U;
+							s_diag_oneshot_remaining = 0U;
+						}
+					} else if (s_diag_oneshot != 0U && s_diag_oneshot_remaining > 0U) {
+						s_diag_oneshot_remaining--;
+					}
+				}
+			} else {
+				/* ---- Transition diag → clock: clear VP first ---- */
+				if (was_diag != 0U) {
+					dwin_timer_clear();
+					was_diag = 0U;
+					diag_index = 0U;
+					time_tick = 0U;  /* force clock redraw immediately */
+				}
+
+				/* No diag active — show time on timer widget (HH:MM:SS only) */
+				if ((now - time_tick) >= 1000U) {
+					time_tick = now;
+					const char *time_str = service_time_sync_get_datetime_str();
+					if (time_str != NULL && time_str[0] != '\0') {
+						size_t tlen = strlen(time_str);
+						/* "DD.MM.YY-HH:MM:SS" → skip first 9 chars → "HH:MM:SS" */
+						if (tlen > 9U) {
+							dwin_timer_output(&time_str[9], tlen - 9U);
+						} else {
+							dwin_timer_output(time_str, tlen);
+						}
 					}
 				}
 			}

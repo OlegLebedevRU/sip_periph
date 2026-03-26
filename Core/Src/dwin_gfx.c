@@ -51,18 +51,21 @@ static uint8_t put16(uint8_t i, uint16_t v)
  *  Register-write helpers (always work on T5L)
  * ======================================================================== */
 
-/* Page switch: register 0x03, data = 2-byte page ID (big-endian)
- *   5A A5 04 80 03 00 PP                                         */
+/* Page switch: VP write to system VP 0x0084 with key 0x5A01
+ *   5A A5 07 82 00 84 5A 01 00 PP                                */
 void dwin_gfx_page_switch(uint8_t page)
 {
     uint8_t i = 0;
     i = put8(i, 0x5A);
     i = put8(i, 0xA5);
-    i = put8(i, 0x04);          /* body length = 4    */
-    i = put8(i, 0x80);          /* cmd: reg write     */
-    i = put8(i, 0x03);          /* register: PIC_ID   */
-    i = put16(i, (uint16_t)page);
-    gfx_send(i);                /* 7 bytes            */
+    i = put8(i, 0x07);          /* body length = 7    */
+    i = put8(i, 0x82);          /* cmd: VP write      */
+    i = put16(i, 0x0084);       /* VP addr: PIC_ID    */
+    i = put8(i, 0x5A);          /* key high           */
+    i = put8(i, 0x01);          /* key low            */
+    i = put8(i, 0x00);          /* page high          */
+    i = put8(i, page);          /* page low           */
+    gfx_send(i);                /* 10 bytes           */
 }
 
 /* Backlight: register 0x82, data = 1 byte (0..0x40 = 0..100%)

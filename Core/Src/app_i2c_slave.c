@@ -504,9 +504,8 @@ static void process_auth_result_write(void)
      * payload[1..4] are accepted but intentionally ignored on STM32 side. */
     uint8_t auth_result = s_ram[HOST_AUTH_RESULT_RAM_ADDR];
 
-#if APP_I2C_SLAVE_AUTH_HMI_DIAG_ENABLE
+    /* Always notify HMI — handles page switch for AUTH=1 and optional display */
     hmi_show_auth_result(auth_result);
-#endif
 
     if (auth_result == 0x00U) {
         HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
@@ -599,7 +598,7 @@ void app_i2c_slave_publish(const I2cPacketToMaster_t *pckt)
 void StartTaskRxTxI2c1(void const *argument)
 {
     I2cPacketToMaster_t pckt;
-    const char *bus_error_msg = "BUS ERROR";
+    const char *bus_error_msg = "BUS ERROR       ";  /* padded to 16 chars for VP 0x5200 */
     (void)argument;
 
     app_i2c_slave_poll_recovery();
