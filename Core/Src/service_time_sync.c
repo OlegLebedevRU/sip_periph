@@ -61,9 +61,9 @@ static bool ds3231_read_time(uint8_t *buf)
     if (osMutexWait(i2c2_MutexHandle, 100) != osOK) {
         return false;
     }
-    status = HAL_I2C_Master_Transmit(&hi2c2, DS3231_I2C_ADDR, &reg, 1, 5);
+    status = HAL_I2C_Master_Transmit(&hi2c2, DS3231_I2C_ADDR, &reg, 1, 10);
     if (status == HAL_OK) {
-        status = HAL_I2C_Master_Receive(&hi2c2, DS3231_I2C_ADDR, buf, I2C_TIME_SYNC_WRITE_LEN, 5);
+        status = HAL_I2C_Master_Receive(&hi2c2, DS3231_I2C_ADDR, buf, I2C_TIME_SYNC_WRITE_LEN, 10);
     }
     osMutexRelease(i2c2_MutexHandle);
     return status == HAL_OK;
@@ -80,30 +80,48 @@ static bool ds3231_write_time(const uint8_t *buf)
     if (osMutexWait(i2c2_MutexHandle, 100) != osOK) {
         return false;
     }
-    status = HAL_I2C_Master_Transmit(&hi2c2, DS3231_I2C_ADDR, payload, sizeof(payload), 5);
+    status = HAL_I2C_Master_Transmit(&hi2c2, DS3231_I2C_ADDR, payload, sizeof(payload), 10);
     osMutexRelease(i2c2_MutexHandle);
     return status == HAL_OK;
 }
 
 /* ---- one-time DS3231 init (moved from StartDefaultTask, step 14) ------- */
 
+#define DS3231_INIT_RETRY_COUNT  3U   /* max attempts to configure DS3231 */
+
 void service_time_sync_init(void)
 {
     /* Disable INTCN → enable SQW 1Hz output on DS3231M.
      * Control register 0x0E, bit2 = INTCN:
      *   INTCN=0 → SQW pin outputs 1Hz square wave (default RS1=RS2=0 → 1Hz).
-     *   INTCN=1 (power-on default) → interrupt output from alarms. */
-    uint8_t cntrl = 0;
-    if (osMutexWait(i2c2_MutexHandle, 100) != osOK) {
-        return;
+     *   INTCN=1 (power-on default) → interrupt output from alarms.
+     *
+     * Retry up to DS3231_INIT_RETRY_COUNT times to handle transient I2C
+     * errors or startup BUSY conditions. */
+    uint8_t retries;
+    for (retries = 0U; retries < DS3231_INIT_RETRY_COUNT; retries++) {
+        uint8_t cntrl = 0U;
+        HAL_StatusTypeDef rd;
+
+        if (retries > 0U) {
+            osDelay(20U);
+        }
+        if (osMutexWait(i2c2_MutexHandle, 200U) != osOK) {
+            continue;
+        }
+        rd = HAL_I2C_Mem_Read(&hi2c2, DS3231_I2C_ADDR,
+                              (uint16_t)DS3231_REG_CONTROL, I2C_MEMADD_SIZE_8BIT,
+                              &cntrl, 1U, 50U);
+        if (rd == HAL_OK) {
+            cntrl = cntrl & (~0x04U);   /* clear INTCN bit */
+            uint8_t p[2] = { DS3231_REG_CONTROL, cntrl };
+            (void)HAL_I2C_Master_Transmit(&hi2c2, DS3231_I2C_ADDR, p, 2U, 10U);
+        }
+        osMutexRelease(i2c2_MutexHandle);
+        if (rd == HAL_OK) {
+            break;
+        }
     }
-    HAL_I2C_Mem_Read(&hi2c2, DS3231_I2C_ADDR,
-                     (uint16_t)DS3231_REG_CONTROL, I2C_MEMADD_SIZE_8BIT,
-                     &cntrl, 1, 100);
-    cntrl = cntrl & (~0x04U);   /* clear INTCN bit */
-    uint8_t p[2] = { DS3231_REG_CONTROL, cntrl };
-    HAL_I2C_Master_Transmit(&hi2c2, DS3231_I2C_ADDR, p, 2, 5);
-    osMutexRelease(i2c2_MutexHandle);
 }
 
 /* ---- public API -------------------------------------------------------- */

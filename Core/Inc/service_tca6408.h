@@ -27,11 +27,15 @@ void service_tca6408_process_irq_event(void);
 /* FreeRTOS task body — registered as osThreadDef(myTask_tca6408a, ...) in main.c */
 void StartTasktca6408a(void const *argument);
 
+/* FreeRTOS task body — I2C2 bus health watchdog using DS3231 1Hz heartbeat */
+void StartTaskI2c2Guard(void const *argument);
+
 HAL_StatusTypeDef service_tca6408_write_reg(uint8_t reg_addr, uint8_t data);
 HAL_StatusTypeDef service_tca6408_read_reg(uint8_t reg_addr, uint8_t *data);
 
 HAL_StatusTypeDef service_tca6408_get_last_hal_status(void);
 uint32_t service_tca6408_get_last_i2c_error(void);
+uint32_t service_tca6408_get_hard_recover_count(void);
 
 bool service_tca6408_is_button_debounce_active(void);
 uint8_t service_tca6408_get_last_inputs(void);

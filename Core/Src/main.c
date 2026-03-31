@@ -33,6 +33,7 @@
 #include "service_matrix_kbd.h"
 #include "app_i2c_slave.h"
 #include "service_pn532_task.h"
+#include "service_tca6408.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -73,6 +74,7 @@ osThreadId myTaskHmiHandle;
 osThreadId myTaskHmiMsgHandle;
 osThreadId myTask_tca6408aHandle;
 osThreadId myTaskI2cGuardHandle;
+osThreadId myTaskI2c2GuardHandle;
 osMessageQId myQueueToMasterHandle;
 osMessageQId myQueueOLEDHandle;
 osMessageQId myQueueWiegandHandle;
@@ -116,6 +118,7 @@ extern void StartTaskHmi(void const * argument);
 extern void StartTaskHmiMsg(void const * argument);
 extern void StartTasktca6408a(void const * argument);
 extern void StartTaskI2cGuard(void const * argument);
+extern void StartTaskI2c2Guard(void const * argument);
 extern void cb_keyTimer(void const * argument);
 void cb_OneSec(void const * argument);
 extern void cb_WiegandPinTimer(void const * argument);
@@ -375,6 +378,11 @@ int main(void)
   osThreadDef(myTaskI2cGuard, StartTaskI2cGuard, osPriorityHigh, 0, 256);
   myTaskI2cGuardHandle = osThreadCreate(osThread(myTaskI2cGuard), NULL);
   rtos_require_alloc(myTaskI2cGuardHandle);
+
+  /* definition and creation of myTaskI2c2Guard — I2C2 bus health monitor */
+  osThreadDef(myTaskI2c2Guard, StartTaskI2c2Guard, osPriorityNormal, 0, 256);
+  myTaskI2c2GuardHandle = osThreadCreate(osThread(myTaskI2c2Guard), NULL);
+  rtos_require_alloc(myTaskI2c2GuardHandle);
 
   /* USER CODE BEGIN RTOS_THREADS */
 	/* add threads, ... */
