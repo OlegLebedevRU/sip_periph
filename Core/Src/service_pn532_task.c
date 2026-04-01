@@ -20,6 +20,7 @@
 #include "pn532_com.h"
 #include "service_pn532_task.h"
 #include "service_runtime_config.h"
+#include "service_time_sync.h"
 
 /* ---- extern RTOS handles from main.c ----------------------------------- */
 extern osSemaphoreId pn532SemaphoreHandle;
@@ -131,7 +132,7 @@ void StartTask532(void const *argument)
 		pckt.payload = &s_slaveTxData[13];  /* TODO: copy-into-outbox for safety */
 		pckt.len = 8;
 		pckt.type = PACKET_UID_532;
-		pckt.ttl = uid_ttl;
+		pckt.ttl = service_time_sync_get_uptime_sec() + TTL_PACKET_SEC;
 		xQueueSendToFront(myQueueToMasterHandle, &pckt, 1);
 		HAL_GPIO_WritePin(TFT_LED_GPIO_Port, TFT_LED_Pin, GPIO_PIN_SET);
 		uint16_t sig1 = 0x01;

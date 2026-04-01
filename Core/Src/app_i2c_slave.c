@@ -611,6 +611,20 @@ void StartTaskRxTxI2c1(void const *argument)
         HAL_I2C_StateTypeDef i2c1_state;
         xQueueReceive(myQueueToMasterHandle, &pckt, osWaitForever);
 
+        /* Release the TIME-packet coalesce slot as soon as the entry is
+         * dequeued so that the next 1Hz tick can re-arm immediately. */
+        if (pckt.type == PACKET_TIME) {
+            service_time_sync_packet_consumed();
+        }
+
+        /* TTL expiry: discard packets that have been waiting longer than
+         * TTL_PACKET_SEC seconds (measured by the DS3231 1Hz uptime counter).
+         * Expired packets are silently dropped and the next queued entry is
+         * fetched immediately. */
+        if (service_time_sync_get_uptime_sec() >= pckt.ttl) {
+            continue;
+        }
+
         do {
             app_i2c_slave_poll_recovery();
             i2c1_state = HAL_I2C_GetState(&hi2c1);

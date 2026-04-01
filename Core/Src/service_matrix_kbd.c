@@ -10,6 +10,7 @@
 #include "cmsis_os.h"
 #include "service_runtime_config.h"
 #include "service_matrix_kbd.h"
+#include "service_time_sync.h"
 
 /* ---- extern RTOS handles/timers from main.c ---------------------------- */
 extern osMessageQId myQueueToMasterHandle;
@@ -96,8 +97,8 @@ void matrix_kbd_exti_from_isr(uint16_t GPIO_Pin, BaseType_t *pxHigherPriorityTas
         pckt.payload = &s_keyb.buf[0];
         pckt.len     = s_keyb.offset;
         pckt.type    = PACKET_PIN;
-        pckt.ttl     = uid_ttl;
-        xQueueSendFromISR(myQueueToMasterHandle, &pckt, pxHigherPriorityTaskWoken);
+        pckt.ttl     = service_time_sync_get_uptime_sec() + TTL_PACKET_SEC;
+        xQueueSendToFrontFromISR(myQueueToMasterHandle, &pckt, pxHigherPriorityTaskWoken);
         xQueueSendFromISR(myQueueOLEDHandle, &sig1, pxHigherPriorityTaskWoken);
         osTimerStart(myTimerKeyHandle, freeze_sec * 1000U);
         s_final_input = 1U;

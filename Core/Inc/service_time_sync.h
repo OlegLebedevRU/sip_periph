@@ -69,6 +69,23 @@ void service_time_sync_datetimepack(void);
  */
 const char *service_time_sync_get_datetime_str(void);
 
+/*
+ * Notify the time-sync module that a PACKET_TIME entry was removed from the
+ * shared queue.  Clears the coalesce flag so the next 1Hz tick can enqueue
+ * a fresh TIME packet.  Call from StartTaskRxTxI2c1 immediately after
+ * xQueueReceive() returns a packet of type PACKET_TIME.
+ */
+void service_time_sync_packet_consumed(void);
+
+/*
+ * Return the monotonic uptime counter in whole seconds, driven by the
+ * DS3231 1Hz SQW signal.  Starts at 0 on power-on and increments once per
+ * DS3231 tick regardless of whether the I2C register read succeeds.
+ * Safe to call from any task or ISR context (volatile read).
+ * Used as the clock source for packet TTL expiry.
+ */
+uint32_t service_time_sync_get_uptime_sec(void);
+
 #ifdef __cplusplus
 }
 #endif

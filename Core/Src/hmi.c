@@ -16,6 +16,7 @@
 #include "dwin_gfx.h"
 #include "hmi_console.h"
 #include "hmi_diag_helper.h"
+#include "service_time_sync.h"
 
 extern osMessageQId myQueueHMIRecvRawHandle, myQueueToMasterHandle,
 		myQueueHmiMsgHandle;
@@ -320,7 +321,7 @@ void StartTaskHmi(void const *argument) {
 				pckt.payload = (uint8_t*) &pin_snapshot;
 				pckt.len     = saved_len + 2U;    /* rtype + bitlength + rdata */
 				pckt.type    = PACKET_PIN_HMI;
-				pckt.ttl     = uid_ttl;
+				pckt.ttl     = service_time_sync_get_uptime_sec() + TTL_PACKET_SEC;
 				xQueueSend(myQueueToMasterHandle, &pckt, 0);
 
 				/* Visual + session feedback */
