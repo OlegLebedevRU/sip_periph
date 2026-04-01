@@ -27,7 +27,12 @@ static char    s_date_time[19] = {0}; /* DD.MM.YY-HH:MM:SS\0 */
  * Only the freshest time reading is relevant, so multiple TIME entries in the
  * queue serve no purpose and waste the 8-slot queue shared with high-priority
  * credential packets (UID, Wiegand, PIN). */
-static volatile uint8_t s_time_in_queue = 0U;
+static volatile uint8_t  s_time_in_queue = 0U;
+/* Monotonic second counter driven by DS3231 1Hz SQW.  Incremented once per
+ * tick in service_time_sync_on_tick() unconditionally (even if the I2C
+ * register read fails) because the SQW signal itself is the time source.
+ * Used as the clock for TTL_PACKET_SEC expiry checks. */
+static volatile uint32_t s_uptime_sec    = 0U;
 
 /* ---- internal helpers -------------------------------------------------- */
 static uint8_t bcd_to_dec(uint8_t value)
@@ -175,6 +180,13 @@ bool service_time_sync_on_tick(void)
      * would freeze the console if the RTC bus is unhealthy. */
     hmi_notify_1hz_tick();
 
+    /* Advance the monotonic uptime counter unconditionally.  The DS3231
+     * SQW 1Hz edge is the time source; the counter is valid even when the
+     * I2C register read below fails.
+     * Overflow: at 1 increment/second, uint32_t wraps after ~136 years of
+     * continuous operation — not a concern for this application. */
+    s_uptime_sec++;
+
     if (!ds3231_read_time(s_hw_time)) {
         return false;
     }
@@ -198,8 +210,15 @@ bool service_time_sync_on_tick(void)
             .payload = s_hw_time,
             .len     = I2C_TIME_SYNC_WRITE_LEN,
             .type    = PACKET_TIME,
-            .ttl     = 1000U,
+            .ttl     = s_uptime_sec + TTL_PACKET_SEC,
         };
+        /* Claim the coalesce slot BEFORE xQueueSend.  The consumer task
+         * calls service_time_sync_packet_consumed() only after a successful
+         * dequeue, which cannot happen until after xQueueSend places the
+         * item in the queue.  Claiming the flag first prevents the opposite
+         * race: if the flag were set AFTER xQueueSend, a fast consumer could
+         * dequeue and clear it before we set it, leaving flag=1 with no
+         * packet in the queue and permanently suppressing future TIME entries. */
         s_time_in_queue = 1U;
         if (xQueueSend(myQueueToMasterHandle, &pckt, 0) != pdTRUE) {
             s_time_in_queue = 0U;  /* queue full – release the slot */
@@ -279,4 +298,9 @@ const char *service_time_sync_get_datetime_str(void)
 void service_time_sync_packet_consumed(void)
 {
     s_time_in_queue = 0U;
+}
+
+uint32_t service_time_sync_get_uptime_sec(void)
+{
+    return s_uptime_sec;
 }

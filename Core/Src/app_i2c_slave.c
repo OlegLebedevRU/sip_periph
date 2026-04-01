@@ -617,6 +617,14 @@ void StartTaskRxTxI2c1(void const *argument)
             service_time_sync_packet_consumed();
         }
 
+        /* TTL expiry: discard packets that have been waiting longer than
+         * TTL_PACKET_SEC seconds (measured by the DS3231 1Hz uptime counter).
+         * Expired packets are silently dropped and the next queued entry is
+         * fetched immediately. */
+        if (service_time_sync_get_uptime_sec() >= pckt.ttl) {
+            continue;
+        }
+
         do {
             app_i2c_slave_poll_recovery();
             i2c1_state = HAL_I2C_GetState(&hi2c1);

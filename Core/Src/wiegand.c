@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include "main.h"
 #include "cmsis_os.h"
+#include "service_time_sync.h"
 extern osTimerId myTimerWiegand_pinHandle;
 extern osTimerId myTimerWiegand_finHandle;
 extern osTimerId myTimerWiegand_lockHandle;
@@ -138,7 +139,7 @@ void cb_WiegandFinTimer(void const *argument) {
 		pckt.payload = (uint8_t *)get_wiegand_data();
 		pckt.len = inputdata.bitlength+2; //slaveTxData[13]+1;
 		pckt.type = PACKET_WIEGAND;
-		pckt.ttl = uid_ttl;
+		pckt.ttl = service_time_sync_get_uptime_sec() + TTL_PACKET_SEC;
 		xQueueSendToFront(myQueueToMasterHandle, &pckt, 0);
 		HAL_GPIO_WritePin(TFT_LED_GPIO_Port, TFT_LED_Pin, GPIO_PIN_SET);
 		return;

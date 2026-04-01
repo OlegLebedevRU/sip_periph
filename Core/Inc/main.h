@@ -130,7 +130,7 @@ void hmi_show_auth_result(uint8_t auth_result);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define uid_ttl 2000
+#define TTL_PACKET_SEC  10U
 #define RELE1_ACT_SEC_DEFAULT 5
 #define RELE1_MODE_FLAG_DEFAULT 1
 #define MATRIX_KEYB_FREEZE_SEC_DEFAULT 5
