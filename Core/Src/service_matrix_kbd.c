@@ -97,7 +97,7 @@ void matrix_kbd_exti_from_isr(uint16_t GPIO_Pin, BaseType_t *pxHigherPriorityTas
         pckt.len     = s_keyb.offset;
         pckt.type    = PACKET_PIN;
         pckt.ttl     = uid_ttl;
-        xQueueSendFromISR(myQueueToMasterHandle, &pckt, pxHigherPriorityTaskWoken);
+        xQueueSendToFrontFromISR(myQueueToMasterHandle, &pckt, pxHigherPriorityTaskWoken);
         xQueueSendFromISR(myQueueOLEDHandle, &sig1, pxHigherPriorityTaskWoken);
         osTimerStart(myTimerKeyHandle, freeze_sec * 1000U);
         s_final_input = 1U;

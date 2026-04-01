@@ -139,7 +139,7 @@ void cb_WiegandFinTimer(void const *argument) {
 		pckt.len = inputdata.bitlength+2; //slaveTxData[13]+1;
 		pckt.type = PACKET_WIEGAND;
 		pckt.ttl = uid_ttl;
-		xQueueSend(myQueueToMasterHandle, &pckt, 0);
+		xQueueSendToFront(myQueueToMasterHandle, &pckt, 0);
 		HAL_GPIO_WritePin(TFT_LED_GPIO_Port, TFT_LED_Pin, GPIO_PIN_SET);
 		return;
 	} else {

@@ -69,6 +69,14 @@ void service_time_sync_datetimepack(void);
  */
 const char *service_time_sync_get_datetime_str(void);
 
+/*
+ * Notify the time-sync module that a PACKET_TIME entry was removed from the
+ * shared queue.  Clears the coalesce flag so the next 1Hz tick can enqueue
+ * a fresh TIME packet.  Call from StartTaskRxTxI2c1 immediately after
+ * xQueueReceive() returns a packet of type PACKET_TIME.
+ */
+void service_time_sync_packet_consumed(void);
+
 #ifdef __cplusplus
 }
 #endif

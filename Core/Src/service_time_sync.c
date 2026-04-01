@@ -22,6 +22,12 @@ void hmi_notify_1hz_tick(void);
 static uint8_t s_hw_time[8] = {0};
 static uint8_t s_cached_time[8] = {0}; /* 0x60..0x66 equivalent */
 static char    s_date_time[19] = {0}; /* DD.MM.YY-HH:MM:SS\0 */
+/* Coalesce flag: set when a PACKET_TIME is already in myQueueToMasterHandle.
+ * Cleared by service_time_sync_packet_consumed() once the consumer dequeues it.
+ * Only the freshest time reading is relevant, so multiple TIME entries in the
+ * queue serve no purpose and waste the 8-slot queue shared with high-priority
+ * credential packets (UID, Wiegand, PIN). */
+static volatile uint8_t s_time_in_queue = 0U;
 
 /* ---- internal helpers -------------------------------------------------- */
 static uint8_t bcd_to_dec(uint8_t value)
@@ -180,18 +186,27 @@ bool service_time_sync_on_tick(void)
      * depending on a separate task to call datetimepack(). */
     service_time_sync_datetimepack();
 
-    {
+    /* Coalesce: only enqueue a new TIME packet when no TIME packet is already
+     * waiting in the queue.  The freshest RTC reading is always reflected in
+     * s_hw_time (updated above), so the consumer always gets up-to-date data
+     * regardless of when exactly the single queued entry is processed.
+     * The flag is claimed BEFORE xQueueSend so the consumer cannot clear it
+     * between a successful send and the flag being set (which would leave flag=1
+     * with no packet in the queue, permanently suppressing future TIME entries). */
+    if (!s_time_in_queue) {
         I2cPacketToMaster_t pckt = {
             .payload = s_hw_time,
             .len     = I2C_TIME_SYNC_WRITE_LEN,
             .type    = PACKET_TIME,
             .ttl     = 1000U,
         };
-        xQueueSend(myQueueToMasterHandle, &pckt, 0);
-
-        return true;
+        s_time_in_queue = 1U;
+        if (xQueueSend(myQueueToMasterHandle, &pckt, 0) != pdTRUE) {
+            s_time_in_queue = 0U;  /* queue full – release the slot */
+        }
     }
-    return false;
+
+    return true;
 }
 
 void service_time_sync_from_master(const uint8_t *master_bcd7, uint8_t rx_count)
@@ -259,4 +274,9 @@ void service_time_sync_datetimepack(void)
 const char *service_time_sync_get_datetime_str(void)
 {
     return s_date_time;
+}
+
+void service_time_sync_packet_consumed(void)
+{
+    s_time_in_queue = 0U;
 }
