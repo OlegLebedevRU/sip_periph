@@ -37,6 +37,10 @@ HAL_StatusTypeDef service_tca6408_get_last_hal_status(void);
 uint32_t service_tca6408_get_last_i2c_error(void);
 uint32_t service_tca6408_get_hard_recover_count(void);
 
+/* Called by pn532_com after each I2C2 operation so PN532 errors feed the
+ * same soft/hard recovery state machine used by TCA6408A transactions. */
+void service_tca6408_i2c2_recover_if_needed(HAL_StatusTypeDef status);
+
 bool service_tca6408_is_button_debounce_active(void);
 uint8_t service_tca6408_get_last_inputs(void);
 

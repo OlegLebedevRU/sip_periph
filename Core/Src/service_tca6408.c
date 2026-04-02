@@ -434,6 +434,19 @@ uint32_t service_tca6408_get_hard_recover_count(void)
     return s_i2c2_hard_recover_count;
 }
 
+/*
+ * service_tca6408_i2c2_recover_if_needed — public entry point for pn532_com.
+ *
+ * Allows PN532 I2C2 transactions to feed the same consecutive-error counter
+ * and soft/hard recovery state machine used by TCA6408A read/write.
+ * Called after each HAL_I2C_Master_Transmit/Receive in task context (mutex
+ * already released), so recovery may safely re-acquire the mutex.
+ */
+void service_tca6408_i2c2_recover_if_needed(HAL_StatusTypeDef status)
+{
+    tca_i2c_recover_if_needed(status);
+}
+
 /* ---- I2C2 guard task ---------------------------------------------------- */
 /*
  * StartTaskI2c2Guard — watchdog for I2C2 bus health.
