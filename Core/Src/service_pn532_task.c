@@ -34,10 +34,9 @@ static uint8_t        s_slaveTxData[64];
 static volatile int   s_pn_i2c_fault = 1;
 
 /* ---- PN532 bounded probe helper ---------------------------------------- */
-#define PN532_PROBE_MAX_RETRIES    200U   /* 200 * 1ms = 200ms budget */
-#define PN532_PROBE_MAX_CONSEC_ERR 3U     /* HAL errors in a row → abort early */
-#define PN532_PROBE_OK             1U
-#define PN532_PROBE_FAIL           0U
+#define PN532_PROBE_MAX_RETRIES  200U   /* 200 * 1ms = 200ms budget */
+#define PN532_PROBE_OK           1U
+#define PN532_PROBE_FAIL         0U
 
 /* Semaphore wait parameters for InListPassiveTarget response */
 #define PN532_SEM_POLL_MS        100U   /* per-slice semaphore timeout         */
@@ -45,22 +44,13 @@ static volatile int   s_pn_i2c_fault = 1;
 #define PN532_FAULT_RETRY_DELAY_MS 500U /* back-off delay after any I2C fault  */
 
 static uint8_t pn532_probe_bounded(uint8_t *probe_buf) {
-	uint8_t consec_err = 0U;
 	for (uint16_t i = 0; i < PN532_PROBE_MAX_RETRIES; i++) {
-		probe_buf[0] = 0;                          /* P2: reset before each read */
-		int r = pn532_read(probe_buf, 1);          /* P3: capture return value   */
+		probe_buf[0] = 0;                          /* reset before each read */
+		int r = pn532_read(probe_buf, 1);          /* capture return value   */
 		if (r > 0 && probe_buf[0] == PN532_READY_BYTE) {
 			probe_buf[0] = 0;
 			osDelay(1);
 			return PN532_PROBE_OK;
-		}
-		/* P3: count consecutive HAL errors; abort early if bus is stuck */
-		if (r == 0) {
-			if (++consec_err >= PN532_PROBE_MAX_CONSEC_ERR) {
-				break;
-			}
-		} else {
-			consec_err = 0U;
 		}
 		osDelay(1);
 	}
