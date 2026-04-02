@@ -38,6 +38,24 @@ static inline void i2c2_unlock(void) {
     osMutexRelease(i2c2_MutexHandle);
 }
 
+static inline uint8_t pn532_should_report_i2c2_status(HAL_StatusTypeDef status,
+                                                      uint32_t error)
+{
+    if (status == HAL_OK) {
+        return 1U;
+    }
+
+    /* PN532 busy polls may NACK (AF) while the chip is still preparing the
+     * next byte/frame. Treat that as an expected device-level wait condition,
+     * not as a shared I2C2 bus fault that should reset TCA6408A/DS3231 too. */
+    uint8_t is_af_only = (uint8_t)(error == HAL_I2C_ERROR_AF);
+    if (is_af_only != 0U) {
+        return 0U;
+    }
+
+    return 1U;
+}
+
 /* ---- Public API -------------------------------------------------------- */
 
 /* Write raw bytes to PN532 over I2C.
@@ -47,9 +65,12 @@ int pn532_write(uint8_t *data, size_t len) {
 
     HAL_StatusTypeDef st = HAL_I2C_Master_Transmit(
         &hi2c2, PN532_I2C_ADDR, data, (uint16_t)len, PN532_I2C_TIMEOUT_MS);
+    uint32_t err = HAL_I2C_GetError(&hi2c2);
 
     i2c2_unlock();
-    service_tca6408_i2c2_recover_if_needed(st);
+    if (pn532_should_report_i2c2_status(st, err) != 0U) {
+        service_tca6408_i2c2_recover_if_needed(st);
+    }
     return (st == HAL_OK) ? 0 : -1;
 }
 
@@ -60,9 +81,12 @@ int pn532_read(uint8_t *buffer, size_t len) {
 
     HAL_StatusTypeDef st = HAL_I2C_Master_Receive(
         &hi2c2, PN532_I2C_ADDR, buffer, (uint16_t)len, PN532_I2C_TIMEOUT_MS);
+    uint32_t err = HAL_I2C_GetError(&hi2c2);
 
     i2c2_unlock();
-    service_tca6408_i2c2_recover_if_needed(st);
+    if (pn532_should_report_i2c2_status(st, err) != 0U) {
+        service_tca6408_i2c2_recover_if_needed(st);
+    }
     return (st == HAL_OK) ? (int)len : 0;
 }
 
