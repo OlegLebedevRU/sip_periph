@@ -177,8 +177,8 @@ void StartTask532(void const *argument)
 		osTimerStart(myTimerBuzzerOffHandle, BUZZER_TIMER2_MS);
 		/* Queued send card uid to Master */
 		I2cPacketToMaster_t pckt;
-		pckt.payload = &s_slaveTxData[13];  /* TODO: copy-into-outbox for safety */
-		pckt.len = I2C_PACKET_UID_532_LEN;
+		pckt.payload = &s_slaveTxData[13];  /* PN532 UID window: uid_len + up to 7 UID bytes */
+		pckt.len = 8U;
 		pckt.type = PACKET_UID_532;
 		pckt.ttl = service_time_sync_get_uptime_sec() + TTL_PACKET_SEC;
 		xQueueSendToFront(myQueueToMasterHandle, &pckt, 1);
