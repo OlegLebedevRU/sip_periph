@@ -42,6 +42,7 @@ static volatile int   s_pn_i2c_fault = 1;
 #define PN532_STATUS_FRAME_OVERHEAD 1U
 #define PN532_MAX_READY_FRAME_LEN (PN532_DATA_READ_LEN + PN532_STATUS_FRAME_OVERHEAD)
 #define PN532_MAX_READY_PAYLOAD_LEN (PN532_MAX_READY_FRAME_LEN - PN532_STATUS_FRAME_OVERHEAD)
+#define PN532_UID_PACKET_LEN      8U
 #define PN532_TCA_INPUTS_IDLE     0xFFU
 
 /* Semaphore wait parameters for InListPassiveTarget response */
@@ -177,8 +178,8 @@ void StartTask532(void const *argument)
 		osTimerStart(myTimerBuzzerOffHandle, BUZZER_TIMER2_MS);
 		/* Queued send card uid to Master */
 		I2cPacketToMaster_t pckt;
-		pckt.payload = &s_slaveTxData[13];  /* TODO: copy-into-outbox for safety */
-		pckt.len = I2C_PACKET_UID_532_LEN;
+		pckt.payload = &s_slaveTxData[13];  /* Byte 0: uid_len, bytes 1..7: UID data */
+		pckt.len = PN532_UID_PACKET_LEN;
 		pckt.type = PACKET_UID_532;
 		pckt.ttl = service_time_sync_get_uptime_sec() + TTL_PACKET_SEC;
 		xQueueSendToFront(myQueueToMasterHandle, &pckt, 1);
