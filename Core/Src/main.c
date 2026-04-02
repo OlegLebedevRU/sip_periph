@@ -255,7 +255,7 @@ int main(void)
   /* Create the semaphores(s) */
   /* definition and creation of pn532Semaphore */
   osSemaphoreDef(pn532Semaphore);
-  pn532SemaphoreHandle = osSemaphoreCreate(osSemaphore(pn532Semaphore), 1);
+  pn532SemaphoreHandle = osSemaphoreCreate(osSemaphore(pn532Semaphore), 0);
   rtos_require_alloc(pn532SemaphoreHandle);
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */

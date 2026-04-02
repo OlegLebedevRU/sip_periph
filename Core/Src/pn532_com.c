@@ -13,6 +13,7 @@
 #include "main.h"
 #include "cmsis_os.h"
 #include "pn532_com.h"
+#include "service_tca6408.h"
 
 /* ---- HW binding -------------------------------------------------------- */
 extern I2C_HandleTypeDef hi2c2;
@@ -48,6 +49,7 @@ int pn532_write(uint8_t *data, size_t len) {
         &hi2c2, PN532_I2C_ADDR, data, (uint16_t)len, PN532_I2C_TIMEOUT_MS);
 
     i2c2_unlock();
+    service_tca6408_i2c2_recover_if_needed(st);
     return (st == HAL_OK) ? 0 : -1;
 }
 
@@ -60,6 +62,7 @@ int pn532_read(uint8_t *buffer, size_t len) {
         &hi2c2, PN532_I2C_ADDR, buffer, (uint16_t)len, PN532_I2C_TIMEOUT_MS);
 
     i2c2_unlock();
+    service_tca6408_i2c2_recover_if_needed(st);
     return (st == HAL_OK) ? (int)len : 0;
 }
 
