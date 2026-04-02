@@ -35,6 +35,9 @@
 static volatile uint8_t s_console_remain = 0U;
 static uint8_t s_console_line_idx = 0U;
 static char s_console_buf[DWIN_CONSOLE_BUF_LEN];
+/* Wall-clock deadline set at activation time.  Used as a fallback when
+ * hmi_notify_1hz_tick() is stalled (e.g. TCA6408A / DS3231 unavailable). */
+static uint32_t s_console_deadline_tick = 0U;
 
 /* ---- External DWIN output (defined in hmi.c) ---------------------------- */
 extern void dwin_text_output(const uint16_t inaddr, const uint8_t *text_to_hmi,
@@ -58,6 +61,12 @@ void hmi_console_activate(uint8_t duration_sec)
 {
     s_console_line_idx = 0U;
     s_console_remain = duration_sec;
+    /* Set absolute wall-clock deadline as a fallback for hmi_console_poll().
+     * If the DS3231 1Hz tick chain is broken after reset, s_console_remain
+     * would never count down and the console would never exit on its own.
+     * The deadline forces an exit after duration_sec real seconds even when
+     * hmi_notify_1hz_tick() is not being called. */
+    s_console_deadline_tick = HAL_GetTick() + ((uint32_t)duration_sec * 1000U);
 }
 
 /* ---- Buffer management -------------------------------------------------- */
@@ -288,6 +297,15 @@ static void hmi_console_update(void)
 void hmi_console_poll(uint8_t *was_console, uint8_t *last_remain,
                       uint32_t *time_tick)
 {
+    /* Fallback: if the DS3231 1Hz chain is stalled (TCA/RTC unavailable),
+     * hmi_notify_1hz_tick() won't be called and s_console_remain never
+     * decrements.  Force expiry via wall-clock deadline so the console
+     * always exits after the requested duration regardless of I2C health. */
+    if ((s_console_remain > 0U) && (s_console_deadline_tick != 0U)
+            && ((int32_t)(HAL_GetTick() - s_console_deadline_tick) >= 0)) {
+        s_console_remain = 0U;
+    }
+
     if (s_console_remain > 0U) {
         if (*was_console == 0U) {
             /* Console just activated — fill all rows once, flush once, switch page */
