@@ -6,7 +6,7 @@
  *
  * Владеет:
  *   - StartTask532 task body
- *   - pn532_probe_bounded() helper
+ *   - bounded PN532 frame-read / IRQ-poll helpers
  *   - slaveTxData[64], pn_i2c_fault
  *
  * Зависимости (extern из main.c / других модулей):
