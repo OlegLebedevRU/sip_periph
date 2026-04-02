@@ -20,7 +20,9 @@
 #include "pn532_com.h"
 #include "service_pn532_task.h"
 #include "service_runtime_config.h"
+#include "service_tca6408.h"
 #include "service_time_sync.h"
+#include "tca6408a_map.h"
 
 /* ---- extern RTOS handles from main.c ----------------------------------- */
 extern osSemaphoreId pn532SemaphoreHandle;
@@ -33,29 +35,47 @@ extern osTimerId     myTimerBuzzerOffHandle;
 static uint8_t        s_slaveTxData[64];
 static volatile int   s_pn_i2c_fault = 1;
 
-/* ---- PN532 bounded probe helper ---------------------------------------- */
+/* ---- PN532 bounded frame-read helper ----------------------------------- */
 #define PN532_PROBE_MAX_RETRIES  200U   /* 200 * 1ms = 200ms budget */
 #define PN532_PROBE_OK           1U
 #define PN532_PROBE_FAIL         0U
+#define PN532_STATUS_FRAME_OVERHEAD 1U
+#define PN532_MAX_READY_FRAME_LEN (PN532_DATA_READ_LEN + PN532_STATUS_FRAME_OVERHEAD)
 
 /* Semaphore wait parameters for InListPassiveTarget response */
 #define PN532_SEM_POLL_MS        100U   /* per-slice semaphore timeout         */
 #define PN532_SEM_WAIT_MAX_ITER  150U   /* 150 * 100ms = 15 s total budget     */
 #define PN532_FAULT_RETRY_DELAY_MS 500U /* back-off delay after any I2C fault  */
 
-static uint8_t pn532_probe_bounded(uint8_t *probe_buf) {
+static uint8_t pn532_read_ready_frame_bounded(uint8_t *frame_buf, size_t frame_len)
+{
+	if (frame_len > PN532_DATA_READ_LEN) {
+		return PN532_PROBE_FAIL;
+	}
+
+	uint8_t rx[PN532_MAX_READY_FRAME_LEN];
+
 	for (uint16_t i = 0; i < PN532_PROBE_MAX_RETRIES; i++) {
-		probe_buf[0] = 0;                          /* reset before each read */
-		int r = pn532_read(probe_buf, 1);          /* capture return value   */
-		if (r > 0 && probe_buf[0] == PN532_READY_BYTE) {
-			probe_buf[0] = 0;
+		int r = pn532_read(rx, frame_len + PN532_STATUS_FRAME_OVERHEAD);
+		if ((r > 0) && (rx[0] == PN532_READY_BYTE)) {
+			memcpy(frame_buf, &rx[1], frame_len);
 			osDelay(1);
 			return PN532_PROBE_OK;
 		}
 		osDelay(1);
 	}
-	probe_buf[0] = 0;
 	return PN532_PROBE_FAIL;
+}
+
+static uint8_t pn532_irq_ready_poll_once(void)
+{
+	uint8_t curr_inputs = 0xFFU;
+
+	if (service_tca6408_read_reg(TCA6408A_REG_INPUT, &curr_inputs) != HAL_OK) {
+		return 0U;
+	}
+
+	return (uint8_t)((curr_inputs & TCA_P3_PN532_IRQ) == 0U);
 }
 
 /* ---- public API -------------------------------------------------------- */
@@ -82,7 +102,6 @@ void StartTask532(void const *argument)
 {
 	/* USER CODE BEGIN StartTask532 */
 	uint8_t cmd[2] = { 0x01, 0x00 };
-	uint8_t probe[1] = { 0 };
 	uint8_t pn_ack[32] = { 0 };
 	uint8_t sam[32] = { 0 };
 	uint8_t stat[32] = { 0 };
@@ -97,29 +116,23 @@ void StartTask532(void const *argument)
 		if (s_pn_i2c_fault) {
 			pn532_send_command(SAMConfiguration, cmd, 1);
 			osDelay(1);
-			if (!pn532_probe_bounded(probe)) { s_pn_i2c_fault = 1; osDelay(PN532_FAULT_RETRY_DELAY_MS); continue; }
-			pn532_read(pn_ack, PN532_ACK_READ_LEN);
+			if (!pn532_read_ready_frame_bounded(pn_ack, PN532_ACK_READ_LEN)) { s_pn_i2c_fault = 1; osDelay(PN532_FAULT_RETRY_DELAY_MS); continue; }
 			osDelay(5);
-			if (!pn532_probe_bounded(probe)) { s_pn_i2c_fault = 1; osDelay(PN532_FAULT_RETRY_DELAY_MS); continue; }
-			pn532_read(sam, PN532_RESP_READ_LEN);
+			if (!pn532_read_ready_frame_bounded(sam, PN532_RESP_READ_LEN)) { s_pn_i2c_fault = 1; osDelay(PN532_FAULT_RETRY_DELAY_MS); continue; }
 			osDelay(1);
 			pn532_send_command(GetGeneralStatus, cmd, 0);
 			osDelay(1);
-			if (!pn532_probe_bounded(probe)) { s_pn_i2c_fault = 1; osDelay(PN532_FAULT_RETRY_DELAY_MS); continue; }
-			pn532_read(pn_ack, PN532_ACK_READ_LEN);
+			if (!pn532_read_ready_frame_bounded(pn_ack, PN532_ACK_READ_LEN)) { s_pn_i2c_fault = 1; osDelay(PN532_FAULT_RETRY_DELAY_MS); continue; }
 			osDelay(5);
-			if (!pn532_probe_bounded(probe)) { s_pn_i2c_fault = 1; osDelay(PN532_FAULT_RETRY_DELAY_MS); continue; }
-			pn532_read(stat, PN532_RESP_READ_LEN);
+			if (!pn532_read_ready_frame_bounded(stat, PN532_RESP_READ_LEN)) { s_pn_i2c_fault = 1; osDelay(PN532_FAULT_RETRY_DELAY_MS); continue; }
 			s_pn_i2c_fault = 0;
 		}
 
 		pn532_send_command(InListPassiveTarget, cmd, 2);
 		memset(&pn_ack[0], 0xCC, 32);
-		probe[0] = 0;
 		osDelay(1);
 		HAL_GPIO_WritePin(TFT_LED_GPIO_Port, TFT_LED_Pin, GPIO_PIN_RESET);
-		if (!pn532_probe_bounded(probe)) { s_pn_i2c_fault = 1; osDelay(PN532_FAULT_RETRY_DELAY_MS); continue; }
-		pn532_read(pn_ack, PN532_ACK_READ_LEN);
+		if (!pn532_read_ready_frame_bounded(pn_ack, PN532_ACK_READ_LEN)) { s_pn_i2c_fault = 1; osDelay(PN532_FAULT_RETRY_DELAY_MS); continue; }
 		memset(s_slaveTxData, 0x04, 64);
 		osDelay(10);
 		/* P4: drain stale semaphore releases that may have accumulated while
@@ -132,8 +145,8 @@ void StartTask532(void const *argument)
 		 * Each iteration:
 		 *   1. Wait on semaphore up to PN532_SEM_POLL_MS (100ms).
 		 *      → TCA detects P3 LOW and releases semaphore on the normal path.
-		 *   2. On timeout: single pn532_read() to check ACK/ready byte.
-		 *      → Allows forward progress even if TCA IRQ is not delivered.
+		 *   2. On timeout: direct TCA input poll for PN532 IRQ level.
+		 *      → Avoids consuming PN532 status byte/frame before the full read.
 		 * Total budget: PN532_SEM_WAIT_MAX_ITER * PN532_SEM_POLL_MS = 15 s. */
 		{
 			uint8_t sem_ready = 0U;
@@ -142,9 +155,8 @@ void StartTask532(void const *argument)
 					sem_ready = 1U;
 					break;
 				}
-				/* Timeout: single ACK poll — does not block the bus beyond one read */
-				uint8_t ack_byte = 0U;
-				if (pn532_read(&ack_byte, 1) > 0 && ack_byte == PN532_READY_BYTE) {
+				/* Timeout: direct TCA input poll — does not consume PN532 response bytes */
+				if (pn532_irq_ready_poll_once() != 0U) {
 					sem_ready = 1U;
 					break;
 				}
@@ -152,8 +164,7 @@ void StartTask532(void const *argument)
 			if (!sem_ready) { s_pn_i2c_fault = 1; osDelay(PN532_FAULT_RETRY_DELAY_MS); continue; }
 		}
 		/* Bounded wait for PN532 data ready after semaphore */
-		if (!pn532_probe_bounded(probe)) { s_pn_i2c_fault = 1; osDelay(PN532_FAULT_RETRY_DELAY_MS); continue; }
-		pn532_read(s_slaveTxData, PN532_DATA_READ_LEN);
+		if (!pn532_read_ready_frame_bounded(s_slaveTxData, PN532_DATA_READ_LEN)) { s_pn_i2c_fault = 1; osDelay(PN532_FAULT_RETRY_DELAY_MS); continue; }
 		s_pn_i2c_fault = 1;
 		MsgHmi_t pn532_msg = { .hmi_lock = LOCKED, .msg_ttl = 1, .msg_buf =
 				HMI_MSG_KEY, .psize = strlen(HMI_MSG_KEY),
