@@ -41,6 +41,8 @@ static volatile int   s_pn_i2c_fault = 1;
 #define PN532_PROBE_FAIL         0U
 #define PN532_STATUS_FRAME_OVERHEAD 1U
 #define PN532_MAX_READY_FRAME_LEN (PN532_DATA_READ_LEN + PN532_STATUS_FRAME_OVERHEAD)
+#define PN532_MAX_READY_PAYLOAD_LEN (PN532_MAX_READY_FRAME_LEN - PN532_STATUS_FRAME_OVERHEAD)
+#define PN532_TCA_INPUTS_IDLE     0xFFU
 
 /* Semaphore wait parameters for InListPassiveTarget response */
 #define PN532_SEM_POLL_MS        100U   /* per-slice semaphore timeout         */
@@ -49,7 +51,7 @@ static volatile int   s_pn_i2c_fault = 1;
 
 static uint8_t pn532_read_ready_frame_bounded(uint8_t *frame_buf, size_t frame_len)
 {
-	if (frame_len > PN532_DATA_READ_LEN) {
+	if (frame_len > PN532_MAX_READY_PAYLOAD_LEN) {
 		return PN532_PROBE_FAIL;
 	}
 
@@ -69,7 +71,7 @@ static uint8_t pn532_read_ready_frame_bounded(uint8_t *frame_buf, size_t frame_l
 
 static uint8_t pn532_irq_ready_poll_once(void)
 {
-	uint8_t curr_inputs = 0xFFU;
+	uint8_t curr_inputs = PN532_TCA_INPUTS_IDLE;
 
 	if (service_tca6408_read_reg(TCA6408A_REG_INPUT, &curr_inputs) != HAL_OK) {
 		return 0U;
