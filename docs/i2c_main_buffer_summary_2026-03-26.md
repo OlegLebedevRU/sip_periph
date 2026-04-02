@@ -271,7 +271,7 @@ Producer:
 При чтении данных PN532 в очередь уходит пакет:
 
 - `type = PACKET_UID_532`
-- `payload = &s_slaveTxData[13]`
+- `payload = &s_slaveTxData[12]`
 - `len = 8`
 
 На publish-стадии он попадает в контрактное окно:
