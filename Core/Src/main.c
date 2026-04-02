@@ -159,9 +159,21 @@ void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t Direction, uint16_t A
 void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c) {
 	if (hi2c == &hi2c1) {
 		app_i2c_slave_error(hi2c);
-	} else if (hi2c == &hi2c2){
-		HAL_I2C_DeInit(hi2c);
-		HAL_I2C_Init(hi2c);
+	} else if (hi2c == &hi2c2) {
+		/* Do NOT call HAL_I2C_DeInit / HAL_I2C_Init from ISR context.
+		 * Calling DeInit here would invoke HAL_I2C_MspDeInit which
+		 * disables I2C2_ER_IRQn — the very interrupt we are currently
+		 * executing — and also operates without the i2c2_MutexHandle,
+		 * racing with any in-progress polling call in a task context.
+		 * Recovery is handled safely in task context:
+		 *   • service_tca6408_read/write_reg → tca_i2c_recover_if_needed()
+		 *     counts consecutive errors and calls i2c2_soft_recover() or
+		 *     i2c2_hard_recover() (with 9-bit clock recovery) after the
+		 *     polling call returns HAL_ERROR.
+		 *   • StartTaskI2c2Guard triggers i2c2_hard_recover() if no
+		 *     DS3231 heartbeat for 2500 ms.
+		 * Just notify the PN532 service so it probes again on the next
+		 * task iteration. */
 		service_pn532_notify_i2c_fault();
 	}
 }
@@ -219,6 +231,16 @@ int main(void)
   /* USER CODE BEGIN 2 */
 	service_pn532_init();
 	memset(app_i2c_slave_get_ram(), 0, 256);
+	/* Initialise I2C1 slave FSM state and deassert PIN_EVENT_TO_ESP
+	 * BEFORE the RTOS scheduler starts.  StartTaskRxTxI2c1 runs at
+	 * osPriorityAboveNormal and calls HAL_I2C_EnableListen_IT before
+	 * StartDefaultTask (osPriorityNormal) ever runs.  Calling
+	 * app_i2c_slave_init() from the lower-priority task would zero all
+	 * diagnostic counters AFTER the slave is already listening, and
+	 * force_idle_event_line() would deassert a rightfully-asserted
+	 * PIN_EVENT_TO_ESP.  Running it here (bare-metal, pre-scheduler)
+	 * avoids both races entirely. */
+	app_i2c_slave_init();
   /* USER CODE END 2 */
 
   /* Create the mutex(es) */
@@ -331,6 +353,18 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_QUEUES */
 	/* add queues, ... */
+
+	/* All queues used by EXTI15_10 ISR are now allocated.
+	 * Clear any pending flags that may have accumulated while the IRQ
+	 * was disabled (e.g. DS3231 SQW edge during peripheral init), then
+	 * re-enable the IRQ.  Clearing pending before enable prevents a
+	 * spurious immediate delivery that would arrive before the TCA6408A
+	 * task has run service_tca6408_init() and set up its state. */
+	__HAL_GPIO_EXTI_CLEAR_IT(EXT_INT_Pin);
+	__HAL_GPIO_EXTI_CLEAR_IT(W_D0_Pin);
+	__HAL_GPIO_EXTI_CLEAR_IT(W_D1_Pin);
+	__HAL_GPIO_EXTI_CLEAR_IT(ROW3_Pin);
+	HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -773,7 +807,14 @@ static void MX_GPIO_Init(void)
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-
+  /* Defer EXTI15_10 re-enable until all RTOS queues are created.
+   * app_irq_router_exti_callback() calls xQueueSendFromISR() on every
+   * TCA6408A/Wiegand/ROW3 edge.  If the IRQ fires before the queue
+   * handles are initialised (NULL), FreeRTOS configASSERT triggers
+   * taskDISABLE_INTERRUPTS() + for(;;) — a hard hang on every NRST.
+   * The IRQ is re-enabled in USER CODE BEGIN RTOS_QUEUES after all
+   * relevant queues (myQueueTCA6408Handle etc.) have been allocated. */
+  HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
@@ -797,7 +838,10 @@ void StartDefaultTask(void const * argument)
   	osTimerStart(myTimerKeyHandle, 300);
   	service_relay_actuator_init();
   	service_matrix_kbd_init();
-  	app_i2c_slave_init();
+  	/* app_i2c_slave_init() is called in main() USER CODE BEGIN 2,
+  	 * before osKernelStart(), to avoid the priority-inversion race where
+  	 * StartTaskRxTxI2c1 (AboveNormal) calls EnableListen_IT before this
+  	 * Normal-priority task runs and clears the diagnostic counters. */
   	/* Инициализировать дефолтные значения конфигурации через сервис */
   	runtime_config_init_defaults(app_i2c_slave_get_ram());
   	service_time_sync_init();
