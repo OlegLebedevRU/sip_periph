@@ -178,7 +178,7 @@ void StartTask532(void const *argument)
 		osTimerStart(myTimerBuzzerOffHandle, BUZZER_TIMER2_MS);
 		/* Queued send card uid to Master */
 		I2cPacketToMaster_t pckt;
-		pckt.payload = &s_slaveTxData[13];  /* PN532 UID window: uid_len + up to 7 UID bytes */
+		pckt.payload = &s_slaveTxData[13];  /* Byte 0: uid_len, bytes 1..7: UID data */
 		pckt.len = PN532_UID_PACKET_LEN;
 		pckt.type = PACKET_UID_532;
 		pckt.ttl = service_time_sync_get_uptime_sec() + TTL_PACKET_SEC;
