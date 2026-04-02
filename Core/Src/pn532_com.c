@@ -41,7 +41,7 @@ static inline void i2c2_unlock(void) {
 static inline uint8_t pn532_should_report_i2c2_status(HAL_StatusTypeDef status,
                                                       uint32_t error)
 {
-    uint8_t is_af_only_error;
+    uint8_t is_af_only;
 
     if (status == HAL_OK) {
         return 1U;
@@ -52,9 +52,9 @@ static inline uint8_t pn532_should_report_i2c2_status(HAL_StatusTypeDef status,
      * not as a shared I2C2 bus fault that should reset TCA6408A/DS3231 too. */
     /* If masking AF clears the entire error word, then AF/NACK is the only
      * active flag and this is an expected PN532 busy-poll response. */
-    is_af_only_error = (uint8_t)((error != HAL_I2C_ERROR_NONE)
-                              && ((error & ~HAL_I2C_ERROR_AF) == 0U));
-    if (is_af_only_error != 0U) {
+    is_af_only = (uint8_t)((error != HAL_I2C_ERROR_NONE)
+                        && ((error & ~HAL_I2C_ERROR_AF) == 0U));
+    if (is_af_only != 0U) {
         return 0U;
     }
 
