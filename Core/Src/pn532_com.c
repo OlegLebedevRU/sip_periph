@@ -41,6 +41,8 @@ static inline void i2c2_unlock(void) {
 static inline uint8_t pn532_should_report_i2c2_status(HAL_StatusTypeDef status,
                                                       uint32_t error)
 {
+    uint8_t af_only_error;
+
     if (status == HAL_OK) {
         return 1U;
     }
@@ -48,7 +50,9 @@ static inline uint8_t pn532_should_report_i2c2_status(HAL_StatusTypeDef status,
     /* PN532 busy polls may NACK (AF) while the chip is still preparing the
      * next byte/frame. Treat that as an expected device-level wait condition,
      * not as a shared I2C2 bus fault that should reset TCA6408A/DS3231 too. */
-    if ((error != HAL_I2C_ERROR_NONE) && ((error & ~HAL_I2C_ERROR_AF) == 0U)) {
+    af_only_error = (uint8_t)((error != HAL_I2C_ERROR_NONE)
+                           && ((error & ~HAL_I2C_ERROR_AF) == 0U));
+    if (af_only_error != 0U) {
         return 0U;
     }
 
