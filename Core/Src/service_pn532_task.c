@@ -178,7 +178,7 @@ void StartTask532(void const *argument)
 		/* Queued send card uid to Master */
 		I2cPacketToMaster_t pckt;
 		pckt.payload = &s_slaveTxData[13];  /* TODO: copy-into-outbox for safety */
-		pckt.len = 8;
+		pckt.len = I2C_PACKET_UID_532_LEN;
 		pckt.type = PACKET_UID_532;
 		pckt.ttl = service_time_sync_get_uptime_sec() + TTL_PACKET_SEC;
 		xQueueSendToFront(myQueueToMasterHandle, &pckt, 1);
