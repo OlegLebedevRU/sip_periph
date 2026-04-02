@@ -52,6 +52,7 @@ static volatile int   s_pn_i2c_fault = 1;
 static uint8_t pn532_read_ready_frame_bounded(uint8_t *frame_buf, size_t frame_len)
 {
 	if (frame_len > PN532_MAX_READY_PAYLOAD_LEN) {
+		/* Local guard only: all current callers use fixed PN532_*_READ_LEN values. */
 		return PN532_PROBE_FAIL;
 	}
 
