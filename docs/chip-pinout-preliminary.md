@@ -1,6 +1,6 @@
 # Chip Pinout — Preliminary Reference
 
-> Статус: предварительный, составлен по схеме `sip_board.kicad_sch`, приложенным schematic notes и исходному коду прошивки.  
+> Статус: предварительный, составлен по схеме `sip_board.kicad_sch`, приложенным schematic notes и исходному коду прошивки.
 > Микроконтроллер: **STM32F411CEUx** (slave), мастер: **ESP32**.
 
 ---
