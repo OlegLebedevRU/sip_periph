@@ -22,6 +22,12 @@ jobs:
       - name: Build Release
         run: make -j$(nproc)
 
+      - name: Generate SHA256 for firmware binary
+        run: |
+          sha256sum Release/sip_periph.bin | awk '{print tolower($1)}' > Release/sip_periph.bin.sha256
+          echo "SHA256:"
+          cat Release/sip_periph.bin.sha256
+
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -31,5 +37,6 @@ jobs:
             Release/sip_periph.hex
             Release/sip_periph.bin
             Release/sip_periph.map
+            Release/sip_periph.bin.sha256
           if-no-files-found: error
           retention-days: 30
