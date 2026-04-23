@@ -208,7 +208,9 @@ void hmi_show_auth_result(uint8_t auth_result);
 #define RELE1_BEFORE_100MS_DEFAULT 1U
 #define RELE1_AUTH_TIMEOUT_ACT_FLAG_DEFAULT 1U
 #define RELE1_AUTH_FAIL_ACT_FLAG_DEFAULT 1U
+#ifndef HW_PROFILE_GM810_USART6
 #define HW_PROFILE_GM810_USART6      1U
+#endif
 #if HW_PROFILE_GM810_USART6
 #define HW_PROFILE_USB_OTG_FS        0U
 #else

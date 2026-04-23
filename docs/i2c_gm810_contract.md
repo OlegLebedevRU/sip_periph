@@ -87,7 +87,7 @@ Rules:
 - this is **not** a normal QR payload
 - STM32 still publishes `PACKET_QR_GM810` instead of a separate error packet
 - `data_len` reflects how many diagnostic bytes were placed into the fixed 12-byte data field
-- diagnostic bytes remain printable ASCII inside the fixed window
+- diagnostic bytes remain printable ASCII inside the fixed window; invalid source bytes may be sanitized to `?`
 - ESP32 must treat the packet as an input error / rejected QR
 
 ### 6.3 Non-ASCII packet
@@ -101,7 +101,7 @@ Rules:
 - this is **not** a normal QR payload
 - STM32 still publishes `PACKET_QR_GM810` instead of a separate error packet
 - `data_len` reflects how many diagnostic bytes were placed into the fixed 12-byte data field
-- diagnostic bytes remain printable ASCII inside the fixed window
+- diagnostic bytes remain printable ASCII inside the fixed window; invalid source bytes may be sanitized to `?`
 - ESP32 must treat the packet as an input error / rejected QR
 
 ### 6.4 Combined error case

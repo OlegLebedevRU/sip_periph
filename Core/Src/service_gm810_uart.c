@@ -89,13 +89,14 @@ static void gm810_publish_completed_frame_from_isr(void)
     s_publish_slot_index = (uint8_t)((s_publish_slot_index + 1U) % GM810_PUBLISH_SLOT_COUNT);
 
     memset(window, 0, I2C_PACKET_QR_GM810_LEN);
-    window[0] = (s_rx.expected_len > GM810_QR_DATA_MAX_LEN) ? GM810_QR_DATA_MAX_LEN : s_rx.expected_len;
+    window[0] = (s_rx.received_len > GM810_QR_DATA_MAX_LEN) ? GM810_QR_DATA_MAX_LEN : s_rx.received_len;
     window[1] = (uint8_t)(GM810_QR_FLAG_PROTOCOL_MODE | s_rx.flags);
     window[2] = 0U;
     window[3] = 1U;
 
     diag_len = window[0];
     for (uint8_t i = 0U; i < diag_len; i++) {
+        /* v1 contract requires printable ASCII even for diagnostic payload. */
         window[4U + i] = gm810_is_printable_ascii(s_rx.payload[i]) ? s_rx.payload[i] : (uint8_t)'?';
     }
 

@@ -148,7 +148,7 @@ For v1 the following rules are mandatory:
 - normal QR payload is limited to printable ASCII `0x20..0x7E`
 - oversize payload is not published as a normal QR; STM32 still publishes `PACKET_QR_GM810` with `flags.error_oversize`
 - payload containing non-printable / non-ASCII bytes is not published as a normal QR; STM32 still publishes `PACKET_QR_GM810` with `flags.error_non_ascii`
-- when an error flag is set, `data[0..data_len-1]` is diagnostic payload inside the same fixed window; bytes placed there remain printable ASCII
+- when an error flag is set, `data[0..data_len-1]` is diagnostic payload inside the same fixed window; bytes placed there remain printable ASCII and invalid source bytes may be sanitized to `?`
 
 `flags` bits for v1:
 
