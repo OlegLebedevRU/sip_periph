@@ -89,6 +89,7 @@ static void gm810_publish_completed_frame_from_isr(void)
     s_publish_slot_index = (uint8_t)((s_publish_slot_index + 1U) % GM810_PUBLISH_SLOT_COUNT);
 
     memset(window, 0, I2C_PACKET_QR_GM810_LEN);
+    /* data_len reports bytes actually placed into the fixed diagnostic/data window. */
     window[0] = (s_rx.received_len > GM810_QR_DATA_MAX_LEN) ? GM810_QR_DATA_MAX_LEN : s_rx.received_len;
     window[1] = (uint8_t)(GM810_QR_FLAG_PROTOCOL_MODE | s_rx.flags);
     window[2] = 0U;
@@ -109,6 +110,7 @@ static void gm810_publish_completed_frame_from_isr(void)
     pckt.type = PACKET_QR_GM810;
     pckt.ttl = service_time_sync_get_uptime_sec() + TTL_PACKET_SEC;
 
+    /* Preserve the current credential-event publish pattern used by other producers. */
     if (xQueueSendToFrontFromISR(myQueueToMasterHandle, &pckt, &prior) == pdTRUE) {
         gm810_note_published_packet(window);
         portYIELD_FROM_ISR(prior);

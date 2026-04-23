@@ -51,7 +51,6 @@ ESP32 flow is always:
 - `chunk_total = 1`
 - chunking is not used in v1
 - normal QR payload is limited to printable ASCII `0x20..0x7E`
-- ESP32 must not expect UTF-8 multibyte payloads in v1
 - ESP32 must not implement multi-frame assembly for this packet in v1
 
 ## 5. Flags
