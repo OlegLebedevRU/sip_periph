@@ -32,6 +32,7 @@
 #include "service_relay_actuator.h"
 #include "service_matrix_kbd.h"
 #include "app_i2c_slave.h"
+#include "service_gm810_uart.h"
 #include "service_pn532_task.h"
 #include "service_tca6408.h"
 /* USER CODE END Includes */
@@ -64,6 +65,7 @@ TIM_HandleTypeDef htim11;
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart6;
 
 osThreadId defaultTaskHandle;
 osThreadId myTask532Handle;
@@ -108,6 +110,7 @@ static void MX_I2C2_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_USART6_UART_Init(void);
 static void MX_TIM11_Init(void);
 void StartDefaultTask(void const * argument);
 extern void StartTask532(void const * argument);
@@ -180,6 +183,7 @@ void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c) {
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 	app_uart_dwin_rx_callback(huart);
+	service_gm810_uart_rx_callback(huart);
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
@@ -189,6 +193,8 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
 		 * DWIN receive FSM so input doesn't go permanently dead. */
 		__HAL_UART_CLEAR_OREFLAG(huart);
 		dwin_uart_start();
+	} else if (huart == &huart6) {
+		service_gm810_uart_error_callback(huart);
 	}
 }
 /* USER CODE END 0 */
@@ -227,9 +233,13 @@ int main(void)
   MX_SPI1_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
+#if HW_PROFILE_GM810_USART6
+  MX_USART6_UART_Init();
+#endif
   MX_TIM11_Init();
   /* USER CODE BEGIN 2 */
 	service_pn532_init();
+	service_gm810_uart_init();
 	memset(app_i2c_slave_get_ram(), 0, 256);
 	/* Initialise I2C1 slave FSM state and deassert PIN_EVENT_TO_ESP
 	 * BEFORE the RTOS scheduler starts.  StartTaskRxTxI2c1 runs at
@@ -353,6 +363,9 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_QUEUES */
 	/* add queues, ... */
+#if HW_PROFILE_GM810_USART6
+	service_gm810_uart_start();
+#endif
 
 	/* All queues used by EXTI15_10 ISR are now allocated.
 	 * Clear any pending flags that may have accumulated while the IRQ
@@ -701,6 +714,29 @@ static void MX_USART2_UART_Init(void)
 }
 
 /**
+  * @brief USART6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART6_UART_Init(void)
+{
+
+  huart6.Instance = USART6;
+  huart6.Init.BaudRate = 9600;
+  huart6.Init.WordLength = UART_WORDLENGTH_8B;
+  huart6.Init.StopBits = UART_STOPBITS_1;
+  huart6.Init.Parity = UART_PARITY_NONE;
+  huart6.Init.Mode = UART_MODE_TX_RX;
+  huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart6.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -831,8 +867,10 @@ static void MX_GPIO_Init(void)
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void const * argument)
 {
+#if HW_PROFILE_USB_OTG_FS
   /* init code for USB_DEVICE */
   MX_USB_DEVICE_Init();
+#endif
   /* USER CODE BEGIN 5 */
   HAL_GPIO_WritePin(GPIOB, COL1_Pin | COL2_Pin | COL3_Pin, GPIO_PIN_RESET);
   	osTimerStart(myTimerKeyHandle, 300);

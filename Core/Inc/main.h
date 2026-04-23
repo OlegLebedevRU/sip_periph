@@ -47,6 +47,7 @@ typedef enum {
 	PACKET_ACK,
 	PACKET_NACK,
 	PACKET_ERROR,
+	PACKET_QR_GM810,
 	PACKET_MAX
 }I2cPacketType_t;
 typedef struct {
@@ -182,6 +183,10 @@ void hmi_show_auth_result(uint8_t auth_result);
 #define TX1_485_GPIO_Port GPIOA
 #define RX1_485_Pin GPIO_PIN_10
 #define RX1_485_GPIO_Port GPIOA
+#define RX6_GM810_Pin GPIO_PIN_11
+#define RX6_GM810_GPIO_Port GPIOA
+#define TX6_GM810_Pin GPIO_PIN_12
+#define TX6_GM810_GPIO_Port GPIOA
 #define DE485_Pin GPIO_PIN_15
 #define DE485_GPIO_Port GPIOA
 #define COL1_Pin GPIO_PIN_4
@@ -203,6 +208,14 @@ void hmi_show_auth_result(uint8_t auth_result);
 #define RELE1_BEFORE_100MS_DEFAULT 1U
 #define RELE1_AUTH_TIMEOUT_ACT_FLAG_DEFAULT 1U
 #define RELE1_AUTH_FAIL_ACT_FLAG_DEFAULT 1U
+#ifndef HW_PROFILE_GM810_USART6
+#define HW_PROFILE_GM810_USART6      1U
+#endif
+#if HW_PROFILE_GM810_USART6
+#define HW_PROFILE_USB_OTG_FS        0U
+#else
+#define HW_PROFILE_USB_OTG_FS        1U
+#endif
 #define I2C_PACKET_TYPE_ADDR      0x00U
 #define I2C_REG_532_ADDR          0x01U
 #define I2C_REG_MATRIX_PIN_ADDR   0x10U
@@ -213,6 +226,7 @@ void hmi_show_auth_result(uint8_t auth_result);
 #define I2C_REG_HMI_ACT_ADDR      0x70U
 #define I2C_REG_HW_TIME_ADDR      0x80U
 #define I2C_REG_HW_TIME_SET_ADDR  0x88U
+#define I2C_REG_QR_GM810_ADDR     0x90U
 #define I2C_REG_CFG_ADDR          0xE0U
 #define I2C_REG_STM32_ERROR_ADDR  0xF0U
 #define I2C_PACKET_UID_532_LEN    15U
@@ -220,6 +234,12 @@ void hmi_show_auth_result(uint8_t auth_result);
 #define I2C_PACKET_WIEGAND_LEN    15U
 #define I2C_PACKET_PIN_HMI_LEN    15U
 #define I2C_PACKET_TIME_LEN       8U
+#define I2C_PACKET_QR_GM810_LEN   16U
+#define GM810_QR_DATA_MAX_LEN     12U
+#define GM810_QR_FLAG_PROTOCOL_MODE  (1U << 0)
+#define GM810_QR_FLAG_RESERVED_CHUNK (1U << 1)
+#define GM810_QR_FLAG_ERROR_OVERSIZE (1U << 2)
+#define GM810_QR_FLAG_ERROR_NON_ASCII (1U << 3)
 #define I2C_TIME_SYNC_WRITE_LEN   7U
 #define TIME_SYNC_MIN_YEAR        26U
 #define TIME_SYNC_MIN_MONTH       3U

@@ -61,6 +61,7 @@ void I2C1_ER_IRQHandler(void);
 void I2C2_EV_IRQHandler(void);
 void I2C2_ER_IRQHandler(void);
 void USART2_IRQHandler(void);
+void USART6_IRQHandler(void);
 void EXTI15_10_IRQHandler(void);
 void OTG_FS_IRQHandler(void);
 /* USER CODE BEGIN EFP */

@@ -144,6 +144,7 @@ static uint8_t packet_reg_for_type(I2cPacketType_t type)
     case PACKET_TIME:     return I2C_REG_HW_TIME_ADDR;
     case PACKET_PIN_HMI:  return I2C_REG_HMI_PIN_ADDR;
     case PACKET_ERROR:    return I2C_REG_STM32_ERROR_ADDR;
+    case PACKET_QR_GM810: return I2C_REG_QR_GM810_ADDR;
     default:              return I2C_PACKET_TYPE_ADDR;
     }
 }
@@ -157,6 +158,7 @@ static uint8_t packet_len_for_type(I2cPacketType_t type, size_t requested_len)
     case PACKET_WIEGAND: contract_len = I2C_PACKET_WIEGAND_LEN; break;
     case PACKET_PIN_HMI: contract_len = I2C_PACKET_PIN_HMI_LEN; break;
     case PACKET_TIME:    contract_len = I2C_PACKET_TIME_LEN; break;
+    case PACKET_QR_GM810: contract_len = I2C_PACKET_QR_GM810_LEN; break;
     default: break;
     }
     return (uint8_t)((contract_len > 0xFFU) ? 0xFFU : contract_len);
@@ -188,6 +190,7 @@ static uint8_t is_known_register(uint8_t base)
          || base == I2C_REG_HMI_ACT_ADDR
          || base == I2C_REG_HW_TIME_ADDR
          || base == I2C_REG_HW_TIME_SET_ADDR
+         || base == I2C_REG_QR_GM810_ADDR
          || base == I2C_REG_CFG_ADDR
          || base == I2C_REG_STM32_ERROR_ADDR) ? 1U : 0U;
 }
