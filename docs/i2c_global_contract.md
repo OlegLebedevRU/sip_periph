@@ -2,7 +2,7 @@
 
 This document is the normative source of truth for the I2C transport contract between ESP32 (`master`) and STM32 (`slave`) in project `sip`.
 
-`docs/i2c_uid532_contract.md` is a scenario-specific profile built on top of this document.
+`docs/i2c_uid532_contract.md` and `docs/i2c_gm810_contract.md` are scenario-specific profiles built on top of this document.
 
 ## 1. Scope
 
@@ -107,6 +107,7 @@ So:
 | `0x70` | `I2C_REG_HMI_ACT_ADDR` | auth/action result write window |
 | `0x80` | `I2C_REG_HW_TIME_ADDR` | STM32 time read window |
 | `0x88` | `I2C_REG_HW_TIME_SET_ADDR` | time sync write window |
+| `0x90` | `I2C_REG_QR_GM810_ADDR` | GM810 QR payload window |
 | `0xE0` | `I2C_REG_CFG_ADDR` | runtime config write block |
 | `0xF0` | `I2C_REG_STM32_ERROR_ADDR` | STM32 diagnostic/error read window |
 
@@ -126,6 +127,36 @@ The master reads `0x00`, obtains `type`, then uses this table.
 | `0x07` | `PACKET_ACK` | n/a | n/a | reserved |
 | `0x08` | `PACKET_NACK` | n/a | n/a | reserved |
 | `0x09` | `PACKET_ERROR` | `0xF0` | `16` | diagnostic/error export |
+| `0x0A` | `PACKET_QR_GM810` | `0x90` | `16` | fixed-length QR/GM810 publish window; byte0=`data_len`, byte1=`flags`, byte2=`chunk_index`, byte3=`chunk_total`, byte4..15=`data` |
+
+### 6.1 `PACKET_QR_GM810` v1 payload profile
+
+`PACKET_QR_GM810` uses the fixed `16`-byte window at `0x90`:
+
+- `byte0`: `data_len`
+- `byte1`: `flags`
+- `byte2`: `chunk_index`
+- `byte3`: `chunk_total`
+- `byte4..15`: diagnostic or QR data bytes
+
+For v1 the following rules are mandatory:
+
+- `data_len <= 12`
+- `chunk_index = 0`
+- `chunk_total = 1`
+- chunking/multi-frame reassembly is not used
+- normal QR payload is limited to printable ASCII `0x20..0x7E`
+- oversize payload is not published as a normal QR; STM32 still publishes `PACKET_QR_GM810` with `flags.error_oversize`
+- payload containing non-printable / non-ASCII bytes is not published as a normal QR; STM32 still publishes `PACKET_QR_GM810` with `flags.error_non_ascii`
+- when an error flag is set, `data[0..data_len-1]` is diagnostic payload inside the same fixed window; bytes placed there remain printable ASCII
+
+`flags` bits for v1:
+
+- bit0 = `from_protocol_mode`
+- bit1 = reserved for future chunked mode, must be `0` in v1
+- bit2 = `error_oversize`
+- bit3 = `error_non_ascii`
+- bit4..7 = reserved, must be treated as `0` unless a future profile defines them
 
 ## 7. Master write catalog (`reg -> len -> payload layout`)
 
@@ -239,7 +270,7 @@ A reworked implementation is compliant only if all statements below are true:
 
 ## 12. Relationship to scenario documents
 
-Scenario documents such as `docs/i2c_uid532_contract.md` must:
+Scenario documents such as `docs/i2c_uid532_contract.md` and `docs/i2c_gm810_contract.md` must:
 
 - inherit transport rules from this document
 - specify only scenario-specific `type`, payload interpretation, and expected side effects
