@@ -209,7 +209,11 @@ void hmi_show_auth_result(uint8_t auth_result);
 #define RELE1_AUTH_TIMEOUT_ACT_FLAG_DEFAULT 1U
 #define RELE1_AUTH_FAIL_ACT_FLAG_DEFAULT 1U
 #define HW_PROFILE_GM810_USART6      1U
-#define HW_PROFILE_USB_OTG_FS        (1U - HW_PROFILE_GM810_USART6)
+#if HW_PROFILE_GM810_USART6
+#define HW_PROFILE_USB_OTG_FS        0U
+#else
+#define HW_PROFILE_USB_OTG_FS        1U
+#endif
 #define I2C_PACKET_TYPE_ADDR      0x00U
 #define I2C_REG_532_ADDR          0x01U
 #define I2C_REG_MATRIX_PIN_ADDR   0x10U
