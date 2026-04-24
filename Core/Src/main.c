@@ -363,9 +363,6 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_QUEUES */
 	/* add queues, ... */
-#if HW_PROFILE_GM810_USART6
-	service_gm810_uart_start();
-#endif
 
 	/* All queues used by EXTI15_10 ISR are now allocated.
 	 * Clear any pending flags that may have accumulated while the IRQ
@@ -896,6 +893,13 @@ void StartDefaultTask(void const * argument)
   	/* Инициализировать дефолтные значения конфигурации через сервис */
   	runtime_config_init_defaults(app_i2c_slave_get_ram());
   	service_time_sync_init();
+    #if HW_PROFILE_GM810_USART6
+      /* Start GM810 only after the scheduler and baseline services are up.
+       * service_gm810_uart_start() applies the reader boot-settle delay itself,
+       * so starting here avoids arming UART RX before the system is ready to
+       * consume and diagnose the first frames. */
+      service_gm810_uart_start();
+    #endif
 	/* Infinite loop */
 	for (;;) {
 		osDelay(100);
