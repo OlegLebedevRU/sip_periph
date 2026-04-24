@@ -17,6 +17,7 @@ extern osMessageQId myQueueToMasterHandle;
 /* Boot-mode (Hybrid) — see docs/gm810_integration_plan_2026-04-23.md §14, §16. */
 #define GM810_BOOT_TX_TIMEOUT_MS     100U   /* §16: ≤100 ms per ~9-byte frame */
 #define GM810_BOOT_RX_TIMEOUT_MS     200U   /* §14.3: practical READ timeout */
+#define GM810_BOOT_INTERBYTE_MS      20U    /* inter-byte gap inside one response */
 #define GM810_BOOT_TX_RETRY          2U     /* §14.6 п.4 */
 #define GM810_BOOT_MAX_RX            16U    /* response buffer (header 4 + data ≤8 + crc 2) */
 
@@ -26,7 +27,10 @@ extern osMessageQId myQueueToMasterHandle;
 #define GM810_BOOT_STATE_OK          3U
 #define GM810_BOOT_STATE_FAILED      4U
 
-/* Acknowledge on successful write/save (manual 10.3 / 10.4). */
+/* Acknowledge frame returned by the module on successful Write Zone (10.3) /
+ * Save Zone (10.4): { type=0x02, addrH=0x00, addrL=0x00, len=0x01, status=0x00,
+ * crc1=0x33, crc2=0x31 }. status=0x00 means OK; CRC bytes are taken verbatim
+ * from Appendix B. */
 static const uint8_t GM810_ACK_OK[7] = {0x02U, 0x00U, 0x00U, 0x01U, 0x00U, 0x33U, 0x31U};
 
 #if defined(__GNUC__)
@@ -158,7 +162,7 @@ static uint16_t gm810_rx_response(uint8_t *buf, uint16_t max_len, uint32_t timeo
 
     /* Remaining bytes: short inter-byte timeout, accept what is there. */
     while (got < max_len) {
-        st = HAL_UART_Receive(&huart6, &buf[got], 1U, 20U);
+        st = HAL_UART_Receive(&huart6, &buf[got], 1U, GM810_BOOT_INTERBYTE_MS);
         if (st != HAL_OK) {
             break;
         }
@@ -193,7 +197,7 @@ static int gm810_read_zone(uint16_t addr, uint8_t count,
     tx[4] = (uint8_t)((addr >> 8) & 0xFFU);
     tx[5] = (uint8_t)(addr & 0xFFU);
     tx[6] = count;
-    tx[7] = 0xABU;
+    tx[7] = 0xABU;  /* CRC placeholder allowed by manual 10.1/10.2 ("AB CD"). */
     tx[8] = 0xCDU;
 
     for (attempt = 0U; attempt < GM810_BOOT_TX_RETRY; attempt++) {
@@ -247,7 +251,7 @@ static int gm810_write_zone(uint16_t addr, const uint8_t *data, uint8_t len)
     tx[5] = (uint8_t)(addr & 0xFFU);
     memcpy(&tx[6], data, len);
     pos = (uint16_t)(6U + len);
-    tx[pos++] = 0xABU;
+    tx[pos++] = 0xABU;  /* CRC placeholder allowed by manual 10.1/10.3. */
     tx[pos++] = 0xCDU;
 
     for (attempt = 0U; attempt < GM810_BOOT_TX_RETRY; attempt++) {
@@ -298,7 +302,7 @@ typedef struct {
 } gm810_zone_target_t;
 
 static const gm810_zone_target_t GM810_ZONE_TARGETS[] = {
-    { 0x0000U, 1U, { 0xD6U, 0x00U } }, /* Mode: continuous, LED on, ... */
+    { 0x0000U, 1U, { 0xD6U, 0x00U } }, /* Mode: LED on, Mute off, Standard light/brightness, Continuous Mode */
     { 0x0013U, 1U, { 0x85U, 0x00U } }, /* Same Barcode Reading delay on, 500 ms */
     { 0x002AU, 2U, { 0x39U, 0x01U } }, /* Baud = 9600 */
     { 0x002CU, 1U, { 0x02U, 0x00U } }, /* Decoder = full, all codes */
