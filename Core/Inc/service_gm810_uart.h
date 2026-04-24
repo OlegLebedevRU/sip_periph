@@ -31,6 +31,12 @@ typedef struct {
 	uint32_t last_usart_cr3;
 	uint32_t last_gpioa_moder;
 	uint32_t last_gpioa_afr_high;
+	uint32_t boot_verify_calls;
+	uint32_t boot_configure_calls;
+	uint32_t boot_save_calls;
+	uint32_t boot_failures;
+	uint32_t boot_last_mismatch_addr;
+	uint8_t  boot_state;
 } service_gm810_uart_diag_t;
 
 void service_gm810_uart_init(void);
