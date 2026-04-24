@@ -183,10 +183,10 @@ void hmi_show_auth_result(uint8_t auth_result);
 #define TX1_485_GPIO_Port GPIOA
 #define RX1_485_Pin GPIO_PIN_10
 #define RX1_485_GPIO_Port GPIOA
-#define RX6_GM810_Pin GPIO_PIN_11
-#define RX6_GM810_GPIO_Port GPIOA
-#define TX6_GM810_Pin GPIO_PIN_12
+#define TX6_GM810_Pin GPIO_PIN_11
 #define TX6_GM810_GPIO_Port GPIOA
+#define RX6_GM810_Pin GPIO_PIN_12
+#define RX6_GM810_GPIO_Port GPIOA
 #define DE485_Pin GPIO_PIN_15
 #define DE485_GPIO_Port GPIOA
 #define COL1_Pin GPIO_PIN_4

@@ -397,8 +397,8 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
 
     __HAL_RCC_GPIOA_CLK_ENABLE();
     /**USART6 GPIO Configuration
-    PA11     ------> USART6_RX
-    PA12     ------> USART6_TX
+    PA11     ------> USART6_TX
+    PA12     ------> USART6_RX
     */
     GPIO_InitStruct.Pin = RX6_GM810_Pin|TX6_GM810_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
@@ -466,8 +466,8 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* huart)
     __HAL_RCC_USART6_CLK_DISABLE();
 
     /**USART6 GPIO Configuration
-    PA11     ------> USART6_RX
-    PA12     ------> USART6_TX
+    PA11     ------> USART6_TX
+    PA12     ------> USART6_RX
     */
     HAL_GPIO_DeInit(GPIOA, RX6_GM810_Pin|TX6_GM810_Pin);
 

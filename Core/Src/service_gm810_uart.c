@@ -12,6 +12,12 @@ extern osMessageQId myQueueToMasterHandle;
 #define GM810_DEDUP_WINDOW_MS        1500U
 #define GM810_PUBLISH_SLOT_COUNT     16U
 
+#if defined(__GNUC__)
+#define GM810_NOINLINE __attribute__((noinline))
+#else
+#define GM810_NOINLINE
+#endif
+
 typedef enum {
     GM810_RX_WAIT_HEADER = 0,
     GM810_RX_WAIT_LEN,
@@ -34,6 +40,7 @@ static uint8_t s_publish_slot_index = 0U;
 static uint8_t s_last_packet[I2C_PACKET_QR_GM810_LEN] = {0};
 static uint8_t s_last_packet_valid = 0U;
 static uint32_t s_last_publish_tick = 0U;
+static volatile service_gm810_uart_diag_t s_diag = {0};
 
 static void gm810_parser_reset(void)
 {
@@ -41,9 +48,11 @@ static void gm810_parser_reset(void)
     s_rx.state = GM810_RX_WAIT_HEADER;
 }
 
-static void gm810_restart_receive_it(void)
+static GM810_NOINLINE void gm810_restart_receive_it(void)
 {
-    HAL_UART_Receive_IT(&huart6, &s_rx_byte, 1U);
+    s_diag.restart_calls++;
+    s_diag.last_uart_error = huart6.ErrorCode;
+    s_diag.last_receive_status = (uint32_t)HAL_UART_Receive_IT(&huart6, &s_rx_byte, 1U);
 }
 
 static uint8_t gm810_is_printable_ascii(uint8_t byte)
@@ -119,6 +128,8 @@ static void gm810_publish_completed_frame_from_isr(void)
 
 void service_gm810_uart_init(void)
 {
+    memset((void *)&s_diag, 0, sizeof(s_diag));
+    s_diag.init_calls = 1U;
     memset(s_publish_slots, 0, sizeof(s_publish_slots));
     memset(s_last_packet, 0, sizeof(s_last_packet));
     s_publish_slot_index = 0U;
@@ -129,6 +140,8 @@ void service_gm810_uart_init(void)
 
 void service_gm810_uart_start(void)
 {
+    s_diag.start_calls++;
+    s_diag.last_uart_error = huart6.ErrorCode;
     gm810_parser_reset();
     gm810_restart_receive_it();
 }
@@ -141,7 +154,12 @@ void service_gm810_uart_rx_callback(UART_HandleTypeDef *huart)
         return;
     }
 
+    s_diag.rx_callbacks++;
+    s_diag.last_rx_byte = s_rx_byte;
+
     now = HAL_GetTick();
+    s_diag.last_rx_tick = now;
+    s_diag.last_uart_error = huart->ErrorCode;
     if ((s_rx.state != GM810_RX_WAIT_HEADER) && ((now - s_rx.last_byte_tick) > GM810_RX_TIMEOUT_MS)) {
         gm810_parser_reset();
     }
@@ -193,7 +211,15 @@ void service_gm810_uart_error_callback(UART_HandleTypeDef *huart)
         return;
     }
 
+    s_diag.error_callbacks++;
+    s_diag.last_uart_error = huart->ErrorCode;
+
     __HAL_UART_CLEAR_OREFLAG(huart);
     gm810_parser_reset();
     gm810_restart_receive_it();
+}
+
+const volatile service_gm810_uart_diag_t *service_gm810_uart_get_diag(void)
+{
+    return &s_diag;
 }

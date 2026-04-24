@@ -832,6 +832,19 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(PIN_EVENT_TO_ESP_GPIO_Port, &GPIO_InitStruct);
 
+  /* USER CODE BEGIN GM810_USART6_GPIO_INIT */
+#if HW_PROFILE_GM810_USART6
+  /* Configure GPIO pins for USART6 (GM810 QR reader on PA11/PA12).
+   * Verified against STM32F411 function map: PA11=USART6_TX, PA12=USART6_RX. */
+  GPIO_InitStruct.Pin = TX6_GM810_Pin | RX6_GM810_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF8_USART6;
+  HAL_GPIO_Init(TX6_GM810_GPIO_Port, &GPIO_InitStruct);
+#endif
+  /* USER CODE END GM810_USART6_GPIO_INIT */
+
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI0_IRQn);
