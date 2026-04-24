@@ -656,3 +656,276 @@ GM810 хорошо вписывается в текущую архитектур
 - канал STM32 -> GM810 используется для boot-time verify/configuration и heartbeat
 
 Аппаратурная база для первой реализации зафиксирована: `USART6` на `PA11/PA12`, с отказом от USB-функции в этом профиле и с явным оформлением выбора `USB/USART` как build-time опции в документации.
+
+## 14. Конкретные команды для boot mode = Hybrid
+
+Раздел уточняет п. 8.3 + п. 11 (`boot mode = Hybrid`) и фиксирует **точные байтовые команды**, которые STM32 должен слать в GM810 на старте.
+
+Ссылки на manual: `vendor-docs/GM810 Series Barcode reader module User Manual-V1.2.3.pdf`, разделы:
+
+- `1.7 Save and Cancel`
+- `2.1 Serial Communication Interface`
+- `2.1.2 Serial Port Calibration` (heartbeat)
+- `10.1 CRC Algorithm`
+- `10.2 Read Zone Bit` (`Type 0x07`)
+- `10.3 Write Zone Bit` (`Type 0x08`)
+- `10.4 Save Zone Bit To Internal Flash` (`Type 0x09`)
+- `10.6 List of zone bit`
+- `12 Appendix B: Common serial port instruction`
+
+### 14.1 Принципы
+
+1. Hybrid = `verify on boot, configure only on mismatch/uninitialized state`.
+2. На каждом старте STM32 **читает** целевые zone bit и сравнивает побайтно с целевым профилем.
+3. Если все целевые байты совпадают — конфигурация считается валидной, никаких write/save не делается.
+4. Если хотя бы один байт не совпадает или не получен валидный ответ за окно `400 ms` — выполняется `write` всех целевых zone bit и в конце один `save`.
+5. После `write` обязательна команда `save` (10.4), иначе настройки потеряются по питанию.
+6. Все команды отправляются одним непрерывным TX-фреймом (без межбайтовых пауз > `400 ms`, см. `10.2/10.3`).
+7. CRC-байты приведены готовыми из `Appendix B` где возможно. Для собственных команд допускается `0xAB 0xCD` (manual `10.1`, `10.2`, `10.3`: «when no need for checking CRC, CRC bite can be filled in 0xAB 0xCD»).
+8. Boot-обмен идёт на текущей baud rate модуля. Если модуль на не-9600, в первой версии baud-recovery не делается (см. п. 14.6).
+
+### 14.2 Целевой профиль в терминах zone bit
+
+| Zone bit | Адрес    | Целевое значение | Смысл (manual `10.6`)                                                                                                                                              |
+| -------- | -------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Mode     | `0x0000` | `0xD6`           | LED on, Mute off, Standard light, Standard brightness, **Continuous Mode** (bit1-0 = `10`). Соответствует `Appendix B` строке «LED on + Mute off + … + Continuous». |
+| Baud lo  | `0x002A` | `0x39`           | Baud rate **9600 bps** (`0x0139` little, lo-byte). См. `Appendix B`: `7E 00 08 02 00 2A 39 01 …`.                                                                  |
+| Baud hi  | `0x002B` | `0x01`           | Baud rate 9600 bps, hi-byte. Parity = none (bit14-13 = `00`).                                                                                                      |
+| Decoder  | `0x002C` | `0x02`           | Full Width + **all bar codes allowed** (decoder unrestricted, см. п.10.5 плана).                                                                                   |
+| SBR      | `0x0013` | `0x85`           | Same Barcode Reading delay **on** (bit7=1) + delay = `0x05` × `100 ms` = **500 ms**. Совпадает с п.4.1 плана (500–1000 ms, выбираем нижнюю границу).               |
+| Output   | `0x0060` | `0xE0`           | bit7=1 **with protocol** + bit6-5=`11` tail=None + bit4=0 RF off + bit3=0 prefix off + bit2=0 CodeID off + bit1=0 suffix off + bit0=0 tail off.                    |
+| AIM ID   | `0x00D0` | `0x00`           | **Forbid AIM ID** (см. `Appendix B`: «Forbid AIM ID = 7E 00 08 01 00 D0 00 AB CD»).                                                                                |
+
+Эти 7 zone bit покрывают все требования п. 11 плана. Остальные параметры остаются заводскими.
+
+### 14.3 Read zone bit — verify-команды
+
+Формат (`10.2`): `7E 00 07 01 <addrH> <addrL> <count> <CRC1> <CRC2>`. CRC заменяется на `AB CD` где допустимо.
+
+Ожидаемый ответ: `02 00 00 <len> <data...> <CRC1> <CRC2>` (данные не сравниваем, кроме байтов `data...`).
+
+| Цель                         | TX-команда (hex)                  | Ожидаемые `data` в ответе |
+| ---------------------------- | --------------------------------- | ------------------------- |
+| Read mode (`0x0000`)         | `7E 00 07 01 00 00 01 AB CD`      | `D6`                      |
+| Read SBR (`0x0013`)          | `7E 00 07 01 00 13 01 AB CD`      | `85`                      |
+| Read baud `0x002A` + `0x002B`| `7E 00 07 01 00 2A 02 AB CD`      | `39 01`                   |
+| Read decoder (`0x002C`)      | `7E 00 07 01 00 2C 01 AB CD`      | `02`                      |
+| Read output (`0x0060`)       | `7E 00 07 01 00 60 01 AB CD`      | `E0`                      |
+| Read AIM ID (`0x00D0`)       | `7E 00 07 01 00 D0 01 AB CD`      | `00`                      |
+
+Готовая верификационная команда «Find baud rate» из `Appendix B` (`7E 00 07 01 00 2A 02 D8 0F`) даёт тот же ответ, что и read `0x002A` длиной 2; STM32 может использовать её как fallback, но в общем случае достаточно read `0x002A` len `2`.
+
+Алгоритм verify:
+
+1. Для каждой строки таблицы 14.3 — отправить TX-команду одним кадром.
+2. Ждать `RX` ответа `02 00 …` максимум `200 ms` (manual оговаривает только тайм-аут на TX-сторону команд `400 ms`; `200 ms` — практический READ-таймаут с запасом).
+3. Если ответ пришёл и `data...` совпадает с ожидаемым — этот zone bit OK.
+4. Если ответ не пришёл или не совпадает хотя бы один байт — пометить `mismatch_or_uninitialized = true`.
+5. Если `mismatch_or_uninitialized == false` после всех чтений — boot-конфигурацию **не трогать**, перейти к разрешению парсера.
+
+### 14.4 Write zone bit — configure-команды (запускаются только при mismatch)
+
+Формат (`10.3`): `7E 00 08 <len> <addrH> <addrL> <data...> AB CD`, где `<len>` = число байт `data...`.
+
+Порядок отправки выбран от низкого адреса к высокому (требование `10.3`: «must follow the order of address from low to high»). Каждая команда — отдельный непрерывный кадр; между кадрами допускается пауза, но в одном кадре пауз быть не должно.
+
+| Шаг | Назначение                              | TX-команда (hex)                            |
+| --- | --------------------------------------- | ------------------------------------------- |
+| W1  | Mode = `0xD6` (Continuous, LED on, …)   | `7E 00 08 01 00 00 D6 AB CD`                |
+| W2  | Same Barcode Delay on, 500 ms           | `7E 00 08 01 00 13 85 AB CD`                |
+| W3  | Baud = 9600 (одной 2-байтовой записью)  | `7E 00 08 02 00 2A 39 01 AB CD`             |
+| W4  | Decoder = full + all codes allowed      | `7E 00 08 01 00 2C 02 AB CD`                |
+| W5  | Output = with-protocol, tail/prefix/etc | `7E 00 08 01 00 60 E0 AB CD`                |
+| W6  | AIM ID = forbid                         | `7E 00 08 01 00 D0 00 AB CD`                |
+
+Ожидаемый ответ на каждый успешный write (`10.3`): `02 00 00 01 00 33 31`.
+
+После всех успешных write — ровно один **save** (`10.4`):
+
+| Шаг | Назначение                          | TX-команда (hex)                |
+| --- | ----------------------------------- | ------------------------------- |
+| S1  | Save zone bit list to internal Flash | `7E 00 09 01 00 00 00 DE C8`    |
+
+Здесь CRC `DE C8` берётся из `Appendix B` как готовое значение (это валидный `CRC_CCITT` для `09 01 00 00 00`; `AB CD` тоже допустим, но `DE C8` оставляем как «предпочитаемый», совпадающий с manual).
+
+Ожидаемый ответ на save: `02 00 00 01 00 33 31`.
+
+### 14.5 Опционально: heartbeat как health-check
+
+Из manual `2.1.2`:
+
+- TX: `7E 00 0A 01 00 00 00 30 1A`
+- RX: `03 00 00 01 00 33 31`
+- рекомендуемый период: `10 s`, разрешено `3` пропуска подряд до признания канала битым.
+
+В первой версии heartbeat **не обязателен** для boot-mode, но удобен как пост-boot link-monitor. Если он включается, его TX-фреймы должны идти с тем же требованием «один непрерывный кадр».
+
+### 14.6 Граничные случаи и поведение
+
+1. **Модуль не отвечает на `read 0x002A` len 2**: считаем, что модуль либо на другом baud rate, либо отсутствует. В первой версии — пометить boot как `failed`, оставить парсер выключенным, инкрементировать диагностический счётчик. Авто-обход baud rate (1200/4800/14400/19200/38400/57600/115200) — задача отдельного этапа, **в v1 не делать**.
+2. **Read вернул валидный кадр, но данные не совпали**: запустить полный configure (W1…W6) + один save (S1). Повторно перечитать (verify) и только при успешном повторном verify признать boot OK.
+3. **Write подтверждён, save не подтверждён**: пометить boot как `failed_save`, парсер **не запускать** (иначе следующий power-cycle вернёт устройство к старой конфигурации без нашего ведома).
+4. **Любая команда не уложилась в `400 ms` из-за GM810_FRAME_TIMEOUT**: повторить TX до `2` раз; при стойком фейле — boot `failed`.
+5. **Поток данных из `Continuous Mode` начинает приходить во время verify/configure**: TX-фреймы команд имеют приоритет; RX-парсер должен быть **выключен на всё время boot-procedure**, иначе фрагменты сканированного кода будут интерпретироваться как «битый ответ». Включать парсер только после успешного завершения boot.
+6. **Power-on settle**: текущий код уже выдерживает `GM810_BOOT_READY_DELAY_MS = 300 ms` перед стартом RX и flush'ит ранний шум; verify-фазу запускать **после** этого окна.
+
+### 14.7 Сводная диаграмма последовательности (Hybrid)
+
+```
+service_gm810_uart_init()
+        │
+        ▼
+service_gm810_uart_start()        // существующий entry point
+        │
+        ▼
+delay 300 ms  +  flush RX         // уже реализовано
+        │
+        ▼
+boot_verify():                    // НОВОЕ
+    for each row in §14.3:
+        TX read zone bit
+        wait RX (≤200 ms)
+        compare bytes
+    if all match → goto ARM_PARSER
+        │
+        ▼
+boot_configure():                 // НОВОЕ
+    TX W1 … W6 (§14.4)
+    TX S1 save (§14.4)
+    wait & validate each ACK = 02 00 00 01 00 33 31
+        │
+        ▼
+boot_verify() again               // perevereka
+    if mismatch → boot = failed, parser off
+        │
+        ▼
+ARM_PARSER:
+    HAL_UART_Receive_IT(...)      // существующий путь приёма
+```
+
+## 15. Соответствие п. 11 плана актуальному коду репо (audit 2026-04-24)
+
+Аудит сделан против:
+
+- `Core/Inc/main.h` (макросы контракта и pin-mapping)
+- `Core/Src/main.c` функция `MX_USART6_UART_Init()`
+- `Core/Inc/service_gm810_uart.h`, `Core/Src/service_gm810_uart.c`
+
+Проверка построчно по п. 11:
+
+| Пункт §11                                                                 | Код репо                                                                                                                       | Статус         |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | -------------- |
+| GM810 на `USART6`                                                         | `extern UART_HandleTypeDef huart6;` используется во всём сервисе                                                                | ✅ соответствует |
+| STM32 pins = `PA11/PA12`                                                  | `TX6_GM810_Pin = GPIO_PIN_11/GPIOA`, `RX6_GM810_Pin = GPIO_PIN_12/GPIOA`                                                       | ✅ соответствует |
+| Профиль `HW_PROFILE_GM810_USART6`                                         | определён в `main.h` (`#define HW_PROFILE_GM810_USART6 1U`)                                                                    | ✅ соответствует |
+| GM810 в `Continuous Mode`                                                 | в коде нет ни одной TX-команды; режим зависит от ручной преднастройки модуля                                                   | ❌ не реализовано |
+| UART `9600 8N1`                                                           | `MX_USART6_UART_Init`: BaudRate=9600, 8B, STOPBITS_1, PARITY_NONE, HW flow none                                                | ✅ соответствует |
+| output = `protocol frame <03><len><data>` printable ASCII `0x20..0x7E`    | парсер в `service_gm810_uart_rx_callback` ждёт `0x03`, читает `len`, накапливает payload; printable-проверка через `gm810_is_printable_ascii` | ✅ парсер есть; на стороне GM810 этот режим **не выставляется** командами  |
+| tail = None / prefix/suffix/AIM/CodeID = off                              | в коде нет TX-команд                                                                                                           | ❌ не реализовано |
+| decoder types = unrestricted                                              | в коде нет TX-команд                                                                                                           | ❌ не реализовано |
+| same barcode delay = on, 500-1000 ms                                      | в коде нет TX-команд                                                                                                           | ❌ не реализовано |
+| STM32 RX = `DMA + IDLE`                                                   | используется `HAL_UART_Receive_IT(&huart6, &s_rx_byte, 1U)` — побайтный IT-приём, не DMA-IDLE                                 | ⚠️ расхождение с рекомендацией §5.2; контракт §11 от этого не страдает, но рекомендация не выполнена |
+| STM32 dedup window = `1-2 s`                                              | `GM810_DEDUP_WINDOW_MS = 1500U`                                                                                                | ✅ соответствует |
+| boot mode = Hybrid (verify on boot, configure only on mismatch)           | `service_gm810_uart_start()` делает только `Abort + flush + delay 300ms + Receive_IT`; verify/configure отсутствуют               | ❌ не реализовано |
+| `PACKET_QR_GM810` через `myQueueToMasterHandle`                           | `gm810_publish_completed_frame_from_isr()` шлёт `pckt.type = PACKET_QR_GM810` через `xQueueSendToFrontFromISR(myQueueToMasterHandle, …)` | ✅ соответствует |
+| I2C окно `16 B`                                                           | `I2C_PACKET_QR_GM810_LEN 16U` в `main.h`                                                                                       | ✅ соответствует |
+| `data`-поле `12 B`                                                        | `GM810_QR_DATA_MAX_LEN 12U` в `main.h`                                                                                         | ✅ соответствует |
+| oversize → тот же пакет с `flags.error_oversize`                          | `GM810_QR_FLAG_ERROR_OVERSIZE` ставится в `s_rx.flags` при `expected_len > GM810_QR_DATA_MAX_LEN`, payload труcируется до 12 B  | ✅ соответствует |
+| невалидные байты → отклоняются как невалидные                              | `GM810_QR_FLAG_ERROR_NON_ASCII` ставится; в публикуемом окне непечатные байты заменяются на `'?'` (труcирование значения, не отбрасывание пакета) | ⚠️ частично — пакет всё равно публикуется (с флагом и заменой); вариант «полное отклонение» в коде не реализован, но в §11 формулировка «отклоняется как невалидный для v1» прямо требует не публиковать. Уточнить намерение или поправить контракт. |
+| Обновлены `docs/i2c_global_contract.md` и `docs/i2c_gm810_contract.md`    | `docs/i2c_gm810_contract.md` существует; синхронизацию с `i2c_global_contract.md` нужно отдельно проверить                     | ⚠️ требует отдельной проверки в §16 (не в скоупе этого аудита)            |
+
+**Главный вывод аудита**: сервис GM810 в текущем коде — это _только consumer/parser_. Канал STM32 → GM810 (TX) **не реализован вообще**: нет API `gm810_write_zone/read_zone/save_config/heartbeat` из п. 8.4, нет verify-фазы, нет configure-фазы, нет save. Это и есть та неопределённость и зависимость от внешней преднастройки, о которой говорит постановка задачи. Раздел §14 этого документа фиксирует точные команды, которые должна выполнить будущая boot-procedure.
+
+Дополнительные расхождения, которые **не блокируют** boot-mode, но стоит зафиксировать отдельно:
+
+1. RX-приём через `HAL_UART_Receive_IT` len=1, а не `HAL_UARTEx_ReceiveToIdle_DMA`. Для boot-фазы это не критично (TX-обмен короткий и синхронный), но для долгосрочного приёма continuous-потока DMA+IDLE остаётся предпочтительнее (см. §5.2).
+2. Политика по non-printable байтам в payload в коде «мягче» текста §11. Решение — либо ослабить формулировку §11 (текущий код корректен и публикует флаг ошибки), либо ужесточить код (полное отклонение пакета без публикации). Этот выбор — вне скоупа boot-mode и должен быть сделан отдельно.
+
+## 16. Промпт для агента: внедрение boot-mode GM810 (Hybrid)
+
+Текст ниже предназначен для подачи AI-агенту реализации как самостоятельный prompt. Он самодостаточен, ссылается на конкретные файлы и фиксирует scope.
+
+---
+
+**Title**: Реализовать GM810 boot-mode = Hybrid (verify-on-boot, configure-on-mismatch, save) в `sip_periph`.
+
+**Context (read-only)**:
+
+- Репозиторий: `OlegLebedevRU/sip_periph` (STM32F411, FreeRTOS, HAL).
+- Целевая постановка и точные байтовые команды: `docs/gm810_integration_plan_2026-04-23.md`, разделы **§4.1**, **§8.3**, **§11**, **§14** (целевой профиль и команды), **§15** (audit текущего кода).
+- Vendor reference: `vendor-docs/GM810 Series Barcode reader module User Manual-V1.2.3.pdf`, главы **10.1–10.6**, **2.1.2**, **Appendix B**.
+- Текущий сервис: `Core/Inc/service_gm810_uart.h`, `Core/Src/service_gm810_uart.c`.
+- Контракт окна: `Core/Inc/main.h` (`PACKET_QR_GM810`, `I2C_PACKET_QR_GM810_LEN`, `GM810_QR_DATA_MAX_LEN`, `GM810_QR_FLAG_*`).
+- UART init: `Core/Src/main.c` функция `MX_USART6_UART_Init` (9600 8N1, no flow). **Менять не требуется.**
+- Producer-паттерн (для аналогии с PN532): `Core/Src/service_pn532_task.c`.
+
+**Goal**:
+
+Добавить TX-канал в `service_gm810_uart` и встроить в существующий `service_gm810_uart_start()` процедуру Hybrid-boot, чтобы исключить зависимость от ручной преднастройки модуля. Парсер RX и публикация в `myQueueToMasterHandle` остаются без изменений по контракту.
+
+**Functional requirements**:
+
+1. Реализовать минимальный TX API в `service_gm810_uart` (внутренний static, экспорт по необходимости только для unit-тестов/диагностики):
+   - `gm810_tx_frame(const uint8_t *bytes, size_t len, uint32_t timeout_ms)` — синхронная отправка одним непрерывным кадром через `HAL_UART_Transmit` (без межбайтовых пауз). Тайм-аут не больше `100 ms` на типовой 9-байтный кадр.
+   - `gm810_read_zone(uint16_t addr, uint8_t count, uint8_t *out_data, uint32_t resp_timeout_ms)` — формирует команду `7E 00 07 01 <addrH> <addrL> <count> AB CD`, шлёт, ждёт ответ `02 00 00 <len> <data...> <crc1> <crc2>`. Возвращает 0 при успехе и валидной длине. CRC ответа не верифицировать в v1 (manual это допускает).
+   - `gm810_write_zone(uint16_t addr, const uint8_t *data, uint8_t len)` — формирует `7E 00 08 <len> <addrH> <addrL> <data...> AB CD`, ждёт ACK `02 00 00 01 00 33 31`.
+   - `gm810_save_config(void)` — шлёт `7E 00 09 01 00 00 00 DE C8`, ждёт ACK `02 00 00 01 00 33 31`.
+
+2. Реализовать boot-procedure внутри `service_gm810_uart_start()` **после** существующего `delay 300 ms + flush + parser_reset` и **до** первого `HAL_UART_Receive_IT`:
+   - `boot_verify()` — последовательно читает 7 zone bit из таблицы §14.3 и сверяет с целевыми значениями.
+   - Если всё совпало — boot OK, сразу армировать парсер (как сейчас).
+   - Если хотя бы одно несоответствие или RX-таймаут — `boot_configure()` шлёт W1…W6 из §14.4, затем S1 (save), затем повторно `boot_verify()`. Только при успешном повторном verify — boot OK.
+   - При двух подряд провалах verify — boot `failed`, парсер **не армировать**, инкрементировать поле диагностики `boot_failures`.
+
+3. Запретить параллельную работу RX-парсера и TX-команд:
+   - На время `boot_verify`/`boot_configure` использовать `HAL_UART_AbortReceive` (он уже вызывается в `service_gm810_uart_start`); приём байта парсером арммировать только после завершения boot.
+   - Для RX ответа на TX-команду использовать **локальный** `HAL_UART_Receive` с тайм-аутом `≤ 200 ms`, не трогая глобальный `s_rx_byte` парсера.
+
+4. Расширить `service_gm810_uart_diag_t` в `Core/Inc/service_gm810_uart.h`:
+   - `uint32_t boot_verify_calls;`
+   - `uint32_t boot_configure_calls;`
+   - `uint32_t boot_save_calls;`
+   - `uint32_t boot_failures;`
+   - `uint32_t boot_last_mismatch_addr;`  // адрес первого несовпавшего zone bit, для диагностики
+   - `uint8_t  boot_state;`              // 0=idle, 1=verify, 2=configure, 3=ok, 4=failed
+
+5. Не вводить heartbeat в этой задаче. Заложить только TODO-комментарий с ссылкой на §14.5.
+
+**Non-functional / contract**:
+
+- НЕ менять контракт `PACKET_QR_GM810`, `I2C_PACKET_QR_GM810_LEN`, `GM810_QR_DATA_MAX_LEN`, `GM810_QR_FLAG_*`.
+- НЕ менять `MX_USART6_UART_Init` (baud остаётся 9600, см. §14.6 п.1 — авто-обход baud не делать).
+- НЕ менять `docs/i2c_global_contract.md` и `docs/i2c_gm810_contract.md` — boot-mode не задевает I2C-контракт.
+- НЕ переходить с `HAL_UART_Receive_IT` на DMA+IDLE в этой задаче (это отдельный refactor по §5.2).
+- Все hex-команды копировать **строго** из таблиц §14.3 и §14.4 настоящего документа. Не пересчитывать CRC для готовых команд из Appendix B (W3 baud, S1 save, AIM ID forbid и т.д.).
+- Между байтами одной команды не должно быть пауз > 400 ms (manual `10.2`/`10.3`). Это обеспечивается `HAL_UART_Transmit` одним вызовом — никакой ручной побайтной отправки.
+
+**Files expected to change**:
+
+- `Core/Inc/service_gm810_uart.h` — расширение `service_gm810_uart_diag_t`.
+- `Core/Src/service_gm810_uart.c` — TX API, boot-procedure, интеграция в `service_gm810_uart_start()`.
+
+**Files NOT to change**:
+
+- `Core/Inc/main.h` (контрактные макросы `PACKET_QR_GM810`/`I2C_PACKET_QR_GM810_LEN`/`GM810_QR_DATA_MAX_LEN`/`GM810_QR_FLAG_*` и pin-defines — без изменений).
+- `Core/Src/main.c` (`MX_USART6_UART_Init`, `HAL_UART_*Callback` диспетчеризация — без изменений).
+- `docs/i2c_global_contract.md`, `docs/i2c_gm810_contract.md`.
+
+**Acceptance criteria**:
+
+1. После cold boot модуля с заведомо «чужими» настройками (например, suffix включён, tail=CR) STM32 за один цикл `service_gm810_uart_start()` приводит модуль к целевому профилю §14.2 и записывает в flash; следующий cold boot завершается без write/save (только verify).
+2. После cold boot модуля с уже целевыми настройками `boot_configure_calls` и `boot_save_calls` остаются `0`; `boot_state == 3 (ok)`.
+3. При физически отключённом GM810 `service_gm810_uart_start()` завершается с `boot_state == 4 (failed)` и **не** армирует RX-парсер; основная FreeRTOS-задача системы при этом не блокируется навсегда (тайм-ауты соблюдены).
+4. Существующий путь публикации `PACKET_QR_GM810` через `myQueueToMasterHandle` работает без изменений на штатно сконфигурированном модуле (regression check: имитировать valid `<03><len><payload>` — пакет должен попасть в очередь как и раньше).
+5. Сборка проекта проходит существующими средствами репо без новых warning'ов в файлах `service_gm810_uart.*`.
+
+**Out of scope (явно не делать в этой задаче)**:
+
+- Авто-определение/изменение baud rate (см. §14.6 п.1).
+- Heartbeat-таск (§14.5).
+- Переход RX на DMA+IDLE (§5.2).
+- Изменение политики по non-printable payload (см. §15, последний пункт замечаний).
+- Любые изменения в i2c-контракте и в публикации.
+
+---
+
