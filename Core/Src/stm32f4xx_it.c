@@ -298,10 +298,12 @@ void USART2_IRQHandler(void)
 void USART6_IRQHandler(void)
 {
   /* USER CODE BEGIN USART6_IRQn 0 */
-  service_gm810_uart_irq_callback(&huart6);
   /* USER CODE END USART6_IRQn 0 */
   HAL_UART_IRQHandler(&huart6);
   /* USER CODE BEGIN USART6_IRQn 1 */
+  /* Let HAL consume RXNE and dispatch RxCplt first. On STM32F4, clearing IDLE
+   * reads DR, so doing that before HAL can race with the last received byte. */
+  service_gm810_uart_irq_callback(&huart6);
 
   /* USER CODE END USART6_IRQn 1 */
 }

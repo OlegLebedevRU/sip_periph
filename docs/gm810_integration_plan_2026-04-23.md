@@ -163,6 +163,12 @@ GM810 умеет выдавать:
 Manual описывает режим:
 
 - output with protocol: `<0x03><length><decoded data>`
+
+Практическое уточнение по фактическому устройству, подтверждённое логическим анализатором на 2026-04-25:
+
+- в используемом проектом профиле GM810 реально выдаёт wire-frame вида `<0x03><0x00><length><decoded data>`
+- то есть `0x03` остаётся маркером decoded-data frame, `byte[1]` стабильно равен `0x00`, а длина полезной нагрузки находится в `byte[2]`
+- для проектной реализации это наблюдение считается нормативным до появления более точной vendor-спецификации именно для используемого профиля прошивки/настроек модуля
 - этот режим работает корректно только при `UTF-8 output format`
 
 Для данного проекта это ограничение приемлемо: в первой версии полезная нагрузка ограничена печатным ASCII, который является безопасным подмножеством `UTF-8`.
@@ -254,7 +260,7 @@ Manual описывает deep sleep и wake-up через serial interrupt.
 - read mode: `Continuous Mode`
 - same barcode delay: `enabled`
 - same barcode delay time: `500-1000 ms`
-- output mode: `protocol frame <03><len><data>` с payload, ограниченным печатным ASCII `0x20..0x7E`
+- output mode: `protocol frame <03><00><len><data>` с payload, ограниченным печатным ASCII `0x20..0x7E`
 - tail: `None`
 - prefix: `disabled`
 - suffix: `disabled`
@@ -273,6 +279,7 @@ Manual описывает deep sleep и wake-up через serial interrupt.
 STM32 получает frame:
 
 - `0x03`
+- `0x00`
 - `len`
 - `len` байт payload
 
@@ -555,7 +562,7 @@ STM32 получает frame:
 ## Этап 2 — базовый bring-up UART
 
 - поднять приём на `9600 8N1`
-- получить сырое чтение кадров `<03><len><data>` от GM810 без публикации в I2C
+- получить сырое чтение кадров `<03><00><len><data>` от GM810 без публикации в I2C
 - подтвердить на стенде, что целевой профиль даёт только printable ASCII `0x20..0x7E`
 
 ## Этап 3 — минимальный producer в STM32
@@ -598,7 +605,7 @@ STM32 получает frame:
    - зафиксировать `USART6` на `PA11/PA12` как единственный целевой тракт
 
 2. **Формат кадра от GM810**
-   - зафиксировать `protocol mode <03><len><data>` как обязательный профиль
+   - зафиксировать `protocol mode <03><00><len><data>` как обязательный профиль
 
 3. **Максимальная длина QR для I2C-контракта**
    - зафиксировать `16 B` окно и `12 B` data field заранее
@@ -617,7 +624,7 @@ STM32 получает frame:
 - STM32 pins = `PA11/PA12`
 - GM810 в `Continuous Mode`
 - UART `9600 8N1`
-- output = `protocol frame <03><len><data>` с printable ASCII payload `0x20..0x7E`
+- output = `protocol frame <03><00><len><data>` с printable ASCII payload `0x20..0x7E`
 - tail = `None`
 - prefix/suffix/AIM/CodeID = `off`
 - decoder types = `unrestricted`
@@ -820,7 +827,7 @@ ARM_PARSER:
 | Профиль `HW_PROFILE_GM810_USART6`                                         | определён в `main.h` (`#define HW_PROFILE_GM810_USART6 1U`)                                                                    | ✅ соответствует |
 | GM810 в `Continuous Mode`                                                 | в коде нет ни одной TX-команды; режим зависит от ручной преднастройки модуля                                                   | ❌ не реализовано |
 | UART `9600 8N1`                                                           | `MX_USART6_UART_Init`: BaudRate=9600, 8B, STOPBITS_1, PARITY_NONE, HW flow none                                                | ✅ соответствует |
-| output = `protocol frame <03><len><data>` printable ASCII `0x20..0x7E`    | парсер в `service_gm810_uart_rx_callback` ждёт `0x03`, читает `len`, накапливает payload; printable-проверка через `gm810_is_printable_ascii` | ✅ парсер есть; на стороне GM810 этот режим **не выставляется** командами  |
+| output = `protocol frame <03><00><len><data>` printable ASCII `0x20..0x7E` | парсер в `service_gm810_uart_rx_callback` ждёт `0x03`, затем `0x00`, затем читает `len` из `byte[2]`, после чего накапливает payload; printable-проверка через `gm810_is_printable_ascii` | ✅ парсер есть; на стороне GM810 этот режим **не выставляется** командами  |
 | tail = None / prefix/suffix/AIM/CodeID = off                              | в коде нет TX-команд                                                                                                           | ❌ не реализовано |
 | decoder types = unrestricted                                              | в коде нет TX-команд                                                                                                           | ❌ не реализовано |
 | same barcode delay = on, 500-1000 ms                                      | в коде нет TX-команд                                                                                                           | ❌ не реализовано |

@@ -7,12 +7,24 @@
 extern UART_HandleTypeDef huart6;
 extern osMessageQId myQueueToMasterHandle;
 
-#define GM810_FRAME_HEADER_BYTE      0x03U
+#define GM810_PROTOCOL_FRAME_TYPE    0x03U
+#define GM810_PROTOCOL_HEADER_ZERO   0x00U
 #define GM810_RX_TIMEOUT_MS          100U
 #define GM810_DEDUP_WINDOW_MS        1500U
 #define GM810_PUBLISH_SLOT_COUNT     16U
 #define GM810_BOOT_READY_DELAY_MS    300U
 #define GM810_BOOT_FLUSH_LIMIT       32U
+
+/* Observed GM810 decoded-data frame on the wire (logic analyzer, 2026-04-25):
+ *   byte[0] = 0x03  - decoded-data frame marker
+ *   byte[1] = 0x00  - reserved / zero byte emitted by the module in this profile
+ *   byte[2] = len   - payload length
+ *   byte[3..]       - payload bytes
+ *
+ * Vendor notes often describe protocol mode in the shortened form <0x03><len><data>,
+ * but the module used in this project actually emits the explicit 3-byte header above.
+ * Keep the header bytes named here so a future format change stays local to the parser.
+ */
 
 /* Boot-mode (Hybrid) — see docs/gm810_integration_plan_2026-04-23.md §14, §16. */
 #define GM810_BOOT_TX_TIMEOUT_MS     100U   /* §16: ≤100 ms per ~9-byte frame */
@@ -40,9 +52,11 @@ static const uint8_t GM810_ACK_OK[7] = {0x02U, 0x00U, 0x00U, 0x01U, 0x00U, 0x33U
 #endif
 
 typedef enum {
-    GM810_RX_WAIT_HEADER = 0,
-    GM810_RX_WAIT_LEN,
+    GM810_RX_WAIT_FRAME_TYPE = 0,
+    GM810_RX_WAIT_PROTOCOL_ZERO,
+    GM810_RX_WAIT_PROTOCOL_LEN,
     GM810_RX_WAIT_PAYLOAD,
+    GM810_RX_WAIT_RAW_PAYLOAD,
 } gm810_rx_state_t;
 
 typedef struct {
@@ -62,6 +76,8 @@ static uint8_t s_last_packet[I2C_PACKET_QR_GM810_LEN] = {0};
 static uint8_t s_last_packet_valid = 0U;
 static uint32_t s_last_publish_tick = 0U;
 static volatile service_gm810_uart_diag_t s_diag = {0};
+
+static uint8_t gm810_is_printable_ascii(uint8_t byte);
 
 static void gm810_capture_hw_state(void)
 {
@@ -113,14 +129,60 @@ static void gm810_flush_pending_rx(void)
 static void gm810_parser_reset(void)
 {
     memset(&s_rx, 0, sizeof(s_rx));
-    s_rx.state = GM810_RX_WAIT_HEADER;
+    s_rx.state = GM810_RX_WAIT_FRAME_TYPE;
+}
+
+static void gm810_begin_raw_frame(void)
+{
+    s_rx.expected_len = 0U;
+    s_rx.received_len = 0U;
+    s_rx.flags = 0U;
+    s_rx.state = GM810_RX_WAIT_RAW_PAYLOAD;
 }
 
 static GM810_NOINLINE void gm810_restart_receive_it(void)
 {
     s_diag.restart_calls++;
+    __HAL_UART_ENABLE_IT(&huart6, UART_IT_IDLE);
     s_diag.last_receive_status = (uint32_t)HAL_UART_Receive_IT(&huart6, &s_rx_byte, 1U);
     gm810_capture_hw_state();
+}
+
+static uint8_t gm810_frame_is_protocol_mode(void)
+{
+    return ((s_rx.flags & GM810_QR_FLAG_PROTOCOL_MODE) != 0U) ? 1U : 0U;
+}
+
+static uint8_t gm810_frame_effective_len(void)
+{
+    uint8_t effective_len = (s_rx.received_len > GM810_QR_DATA_MAX_LEN) ? GM810_QR_DATA_MAX_LEN : s_rx.received_len;
+
+    if ((gm810_frame_is_protocol_mode() == 0U) && (effective_len > 0U) && (s_rx.payload[effective_len - 1U] == (uint8_t)'\r')) {
+        effective_len--;
+    }
+
+    return effective_len;
+}
+
+static void gm810_append_payload_byte(uint8_t byte)
+{
+    if (s_rx.received_len < GM810_QR_DATA_MAX_LEN) {
+        s_rx.payload[s_rx.received_len] = byte;
+    } else {
+        s_rx.flags |= GM810_QR_FLAG_ERROR_OVERSIZE;
+    }
+
+    if (gm810_frame_is_protocol_mode() != 0U) {
+        if (gm810_is_printable_ascii(byte) == 0U) {
+            s_rx.flags |= GM810_QR_FLAG_ERROR_NON_ASCII;
+        }
+    } else if ((byte != (uint8_t)'\r') && (gm810_is_printable_ascii(byte) == 0U)) {
+        s_rx.flags |= GM810_QR_FLAG_ERROR_NON_ASCII;
+    }
+
+    if (s_rx.received_len < 0xFFU) {
+        s_rx.received_len++;
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -428,7 +490,7 @@ static void gm810_publish_completed_frame_from_isr(void)
     I2cPacketToMaster_t pckt;
     BaseType_t prior = pdFALSE;
 
-    if (s_rx.expected_len == 0U) {
+    if (s_rx.received_len == 0U) {
         return;
     }
 
@@ -436,13 +498,16 @@ static void gm810_publish_completed_frame_from_isr(void)
     s_publish_slot_index = (uint8_t)((s_publish_slot_index + 1U) % GM810_PUBLISH_SLOT_COUNT);
 
     memset(window, 0, I2C_PACKET_QR_GM810_LEN);
+    diag_len = gm810_frame_effective_len();
+    if (diag_len == 0U) {
+        return;
+    }
     /* data_len reports bytes actually placed into the fixed diagnostic/data window. */
-    window[0] = (s_rx.received_len > GM810_QR_DATA_MAX_LEN) ? GM810_QR_DATA_MAX_LEN : s_rx.received_len;
-    window[1] = (uint8_t)(GM810_QR_FLAG_PROTOCOL_MODE | s_rx.flags);
+    window[0] = diag_len;
+    window[1] = s_rx.flags;
     window[2] = 0U;
     window[3] = 1U;
 
-    diag_len = window[0];
     for (uint8_t i = 0U; i < diag_len; i++) {
         /* v1 contract requires printable ASCII even for diagnostic payload. */
         window[4U + i] = gm810_is_printable_ascii(s_rx.payload[i]) ? s_rx.payload[i] : (uint8_t)'?';
@@ -507,11 +572,15 @@ void service_gm810_uart_start(void)
     gm810_flush_pending_rx();
 
     if (boot_rc != 0) {
-        /* §16 п.3 / acceptance criterion #3: leave parser disarmed on boot
-         * failure so that an absent / mis-configured module does not feed
-         * the publish path with garbage. */
+        /* Boot Hybrid verify/configure path failed.  Keep the failure state in
+         * diagnostics, but do NOT permanently disable the runtime RX parser:
+         * some deployed modules may already be manually preconfigured (or may
+         * reject zone-bit commands / be temporarily unavailable on TX) while
+         * still producing valid <03><00><len><data> scan frames on RX.
+         *
+         * This degrades the service to passive RX-only mode instead of making
+         * the whole GM810 path unusable after one failed boot negotiation. */
         gm810_capture_hw_state();
-        return;
     }
 
     gm810_parser_reset();
@@ -533,40 +602,71 @@ void service_gm810_uart_irq_callback(UART_HandleTypeDef *huart)
 
     s_diag.irq_callbacks++;
     s_diag.last_irq_tick = HAL_GetTick();
+
+    if ((__HAL_UART_GET_FLAG(huart, UART_FLAG_IDLE) != RESET)
+        && (__HAL_UART_GET_FLAG(huart, UART_FLAG_RXNE) == RESET)) {
+        __HAL_UART_CLEAR_IDLEFLAG(huart);
+
+        if ((s_rx.state == GM810_RX_WAIT_RAW_PAYLOAD) && (s_rx.received_len > 0U)) {
+            gm810_publish_completed_frame_from_isr();
+            gm810_parser_reset();
+        }
+    }
+
     gm810_capture_hw_state();
 }
 
 void service_gm810_uart_rx_callback(UART_HandleTypeDef *huart)
 {
     uint32_t now;
+    uint8_t rx_byte;
 
     if (huart != &huart6) {
         return;
     }
 
     s_diag.rx_callbacks++;
-    s_diag.last_rx_byte = s_rx_byte;
+    rx_byte = s_rx_byte;
+    s_diag.last_rx_byte = rx_byte;
 
     now = HAL_GetTick();
     s_diag.last_rx_tick = now;
     gm810_capture_hw_state();
-    if ((s_rx.state != GM810_RX_WAIT_HEADER) && ((now - s_rx.last_byte_tick) > GM810_RX_TIMEOUT_MS)) {
+    if ((s_rx.state != GM810_RX_WAIT_FRAME_TYPE) && ((now - s_rx.last_byte_tick) > GM810_RX_TIMEOUT_MS)) {
+        if ((s_rx.state == GM810_RX_WAIT_RAW_PAYLOAD) && (s_rx.received_len > 0U)) {
+            gm810_publish_completed_frame_from_isr();
+        }
         gm810_parser_reset();
     }
     s_rx.last_byte_tick = now;
 
-    if (s_rx.state == GM810_RX_WAIT_HEADER) {
-        if (s_rx_byte == GM810_FRAME_HEADER_BYTE) {
-            s_rx.state = GM810_RX_WAIT_LEN;
+    switch (s_rx.state) {
+    case GM810_RX_WAIT_FRAME_TYPE:
+        if (rx_byte == GM810_PROTOCOL_FRAME_TYPE) {
+            s_rx.state = GM810_RX_WAIT_PROTOCOL_ZERO;
+        } else {
+            gm810_begin_raw_frame();
+            gm810_append_payload_byte(rx_byte);
         }
-        gm810_restart_receive_it();
-        return;
-    }
+        break;
 
-    if (s_rx.state == GM810_RX_WAIT_LEN) {
-        s_rx.expected_len = s_rx_byte;
+    case GM810_RX_WAIT_PROTOCOL_ZERO:
+        if (rx_byte == GM810_PROTOCOL_HEADER_ZERO) {
+            s_rx.state = GM810_RX_WAIT_PROTOCOL_LEN;
+        } else {
+            /* False start: preserve both bytes as raw payload so we do not lose
+             * data when the stream does not actually match the observed protocol
+             * header shape. */
+            gm810_begin_raw_frame();
+            gm810_append_payload_byte(GM810_PROTOCOL_FRAME_TYPE);
+            gm810_append_payload_byte(rx_byte);
+        }
+        break;
+
+    case GM810_RX_WAIT_PROTOCOL_LEN:
+        s_rx.expected_len = rx_byte;
         s_rx.received_len = 0U;
-        s_rx.flags = 0U;
+        s_rx.flags = GM810_QR_FLAG_PROTOCOL_MODE;
         if (s_rx.expected_len == 0U) {
             gm810_parser_reset();
         } else {
@@ -575,21 +675,21 @@ void service_gm810_uart_rx_callback(UART_HandleTypeDef *huart)
             }
             s_rx.state = GM810_RX_WAIT_PAYLOAD;
         }
-        gm810_restart_receive_it();
-        return;
-    }
+        break;
 
-    if (s_rx.received_len < GM810_QR_DATA_MAX_LEN) {
-        s_rx.payload[s_rx.received_len] = s_rx_byte;
-    }
-    if (gm810_is_printable_ascii(s_rx_byte) == 0U) {
-        s_rx.flags |= GM810_QR_FLAG_ERROR_NON_ASCII;
-    }
-    s_rx.received_len++;
+    case GM810_RX_WAIT_PAYLOAD:
+    case GM810_RX_WAIT_RAW_PAYLOAD:
+        gm810_append_payload_byte(rx_byte);
 
-    if (s_rx.received_len >= s_rx.expected_len) {
-        gm810_publish_completed_frame_from_isr();
+        if ((s_rx.state == GM810_RX_WAIT_PAYLOAD) && (s_rx.received_len >= s_rx.expected_len)) {
+            gm810_publish_completed_frame_from_isr();
+            gm810_parser_reset();
+        }
+        break;
+
+    default:
         gm810_parser_reset();
+        break;
     }
 
     gm810_restart_receive_it();

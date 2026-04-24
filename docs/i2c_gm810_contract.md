@@ -57,7 +57,7 @@ ESP32 flow is always:
 
 | Bit | Symbol | Meaning in v1 |
 |---|---|---|
-| `0` | `from_protocol_mode` | STM32 received the GM810 frame in protocol mode `<0x03><len><data>` |
+| `0` | `from_protocol_mode` | STM32 received the GM810 frame in protocol mode `<0x03><0x00><len><data>` |
 | `1` | `reserved_chunked` | reserved for future chunking; must be `0` in v1 |
 | `2` | `error_oversize` | source frame length was greater than `12` |
 | `3` | `error_non_ascii` | source frame contained bytes outside printable ASCII `0x20..0x7E` |
