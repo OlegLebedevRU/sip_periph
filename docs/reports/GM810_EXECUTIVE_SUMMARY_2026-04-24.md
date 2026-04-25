@@ -1,3 +1,5 @@
+> **Status:** archived report — оставлено для истории. Актуальные контракты см. в `docs/` (i2c_*_contract.md). Индекс документации: `docs/README.md`.
+
 # 🎯 GM810 USART6 - EXECUTIVE SUMMARY
 
 **Date:** 2026-04-24  
