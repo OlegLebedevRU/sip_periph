@@ -1,3 +1,5 @@
+> **Status:** archived report — оставлено для истории. Актуальные контракты см. в `docs/` (i2c_*_contract.md). Индекс документации: `docs/README.md`.
+
 # Refactoring Plan: sip_periph — декомпозиция потоков
 
 **Проект:** sip_periph (STM32F411CEUx, FreeRTOS)
