@@ -33,7 +33,7 @@
 
 ### 1. Собрать debug-конфигурацию
 
-1. Открыть проект `/home/runner/work/sip_periph/sip_periph` в STM32CubeIDE 2.0.
+1. Открыть проект `<project_root>` в STM32CubeIDE 2.0.
 2. Выбрать конфигурацию **Debug**.
 3. Убедиться, что компиляция идёт с debug symbols (`-g`).
 4. Выполнить **Project -> Build Project**.
@@ -59,7 +59,7 @@
 - `UsageFault_Handler`
 
 Файл:
-- `/home/runner/work/sip_periph/sip_periph/Core/Src/stm32f4xx_it.c`
+- `Core/Src/stm32f4xx_it.c`
 
 Если доступен breakpoint manager, лучше сразу добавить все четыре.
 
@@ -195,6 +195,5 @@
 
 Именно этот второй шаг подготовлен в файлах:
 
-- `/home/runner/work/sip_periph/sip_periph/docs/risk-audit/proposed/Core/Src/fault_capture_example.c`
-- `/home/runner/work/sip_periph/sip_periph/docs/risk-audit/proposed/patches/linker-noinit-snippet.ld`
-
+- `docs/risk-audit/proposed/Core/Src/fault_capture_example.c`
+- `docs/risk-audit/proposed/patches/linker-noinit-snippet.ld`

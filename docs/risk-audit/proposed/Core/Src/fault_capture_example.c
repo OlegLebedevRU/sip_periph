@@ -21,12 +21,33 @@ typedef struct {
 
 __attribute__((section(".noinit"))) volatile fault_dump_t g_fault_dump;
 
+#define STM32F411_SRAM_BASE 0x20000000UL
+#define STM32F411_SRAM_END  0x20020000UL
+
+static uint8_t Fault_IsValidStackPointer(const uint32_t *stack_ptr)
+{
+    uint32_t addr = (uint32_t)stack_ptr;
+    uint32_t end_addr = addr + (8U * sizeof(uint32_t));
+
+    if (addr < STM32F411_SRAM_BASE) {
+        return 0U;
+    }
+    if (end_addr > STM32F411_SRAM_END) {
+        return 0U;
+    }
+    if ((addr & 0x7U) != 0U) {
+        return 0U;
+    }
+
+    return 1U;
+}
+
 static void Fault_SaveAndReset(uint32_t *stack_ptr, uint32_t exc_return)
 {
     g_fault_dump.magic = 0xFA17FA17U;
     g_fault_dump.exc_return = exc_return;
 
-    if (stack_ptr != 0U) {
+    if (Fault_IsValidStackPointer(stack_ptr) != 0U) {
         g_fault_dump.r0  = stack_ptr[0];
         g_fault_dump.r1  = stack_ptr[1];
         g_fault_dump.r2  = stack_ptr[2];

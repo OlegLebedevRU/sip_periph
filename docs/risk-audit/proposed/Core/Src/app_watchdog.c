@@ -14,7 +14,7 @@ void AppWdg_Init(void)
 {
     s_hiwdg.Instance = IWDG;
     s_hiwdg.Init.Prescaler = IWDG_PRESCALER_32;
-    s_hiwdg.Init.Reload = 1499U; /* ~1.5 s @ 32 kHz typical LSI */
+    s_hiwdg.Init.Reload = 1499U; /* ~1.5 s at nominal 32 kHz LSI; real timeout depends on LSI spread */
 
     if (HAL_IWDG_Init(&s_hiwdg) != HAL_OK) {
         NVIC_SystemReset();

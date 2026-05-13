@@ -33,7 +33,7 @@ Main conclusions:
 | Keyboard buffer can overflow | [`Core/Src/service_matrix_kbd.c#L87-L89`](https://github.com/OlegLebedevRU/sip_periph/blob/main/Core/Src/service_matrix_kbd.c#L87-L89), buffer size [`Core/Inc/main.h#L64-L67`](https://github.com/OlegLebedevRU/sip_periph/blob/main/Core/Inc/main.h#L64-L67) | `s_keyb.offset` is incremented without a hard bound before writing the next byte and terminator | Guard `offset < sizeof(buf) - 1` before every write |
 | Unbounded `strcpy()` on OLED task stack | [`Core/Src/service_oled_task.c#L43-L55`](https://github.com/OlegLebedevRU/sip_periph/blob/main/Core/Src/service_oled_task.c#L43-L55) | If the source is not safely terminated, stack corruption is possible | Replace with bounded copy and forced NUL |
 | Wiegand bit collection can write past the end of `readerdata.rdata` | [`Core/Src/wiegand.c#L181-L191`](https://github.com/OlegLebedevRU/sip_periph/blob/main/Core/Src/wiegand.c#L181-L191), array size [`Core/Inc/main.h#L92-L100`](https://github.com/OlegLebedevRU/sip_periph/blob/main/Core/Inc/main.h#L92-L100) | No bound check on `bytenum`; excessive bits/noise can corrupt adjacent memory | Abort/reset state if `bytenum >= sizeof(readerdata.rdata)` |
-| Early enable/disable window for EXTI15_10 | [`Core/Src/main.c#L852-L863`](https://github.com/OlegLebedevRU/sip_periph/blob/main/Core/Src/main.c#L852-L863) | The IRQ is enabled before it is deliberately disabled; a narrow early interrupt window still exists | Do not enable this IRQ in `MX_GPIO_Init()` until queues are ready |
+| Early enable/disable window for EXTI15_10 | [`Core/Src/main.c#L852-L863`](https://github.com/OlegLebedevRU/sip_periph/blob/main/Core/Src/main.c#L852-L863) | This is an initialization race: `EXTI15_10_IRQn` is first enabled by generated setup, then disabled in user code. A pending edge in that short window can still run ISR code before `myQueueTCA6408Handle` / `myQueueWiegandHandle` and related routing state are fully ready | Do not enable this IRQ in `MX_GPIO_Init()`; enable it only after the dependent queues are created |
 | `_exit()` hangs forever | [`Core/Src/syscalls.c#L61-L65`](https://github.com/OlegLebedevRU/sip_periph/blob/main/Core/Src/syscalls.c#L61-L65) | Any accidental path into `_exit()` becomes a permanent dead stop | Panic log + reset instead of `while(1)` |
 
 ---
@@ -200,7 +200,7 @@ Critical tasks to register:
 The proposed implementation is intentionally **not applied** to the existing source tree.
 All suggested integration code is saved only under:
 
-- `/home/runner/work/sip_periph/sip_periph/docs/risk-audit/proposed/`
+- `docs/risk-audit/proposed/`
 
 That bundle includes:
 
@@ -208,4 +208,3 @@ That bundle includes:
 - fault dump example;
 - FreeRTOS config snippet;
 - linker snippet for `.noinit`.
-
