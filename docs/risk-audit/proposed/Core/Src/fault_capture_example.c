@@ -19,6 +19,7 @@ typedef struct {
     uint32_t shcsr;
 } fault_dump_t;
 
+/* volatile keeps compiler accesses explicit for a crash record that survives reset in .noinit. */
 __attribute__((section(".noinit"))) volatile fault_dump_t g_fault_dump;
 extern uint8_t _estack;
 

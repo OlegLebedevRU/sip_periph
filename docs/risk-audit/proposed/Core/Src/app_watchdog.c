@@ -14,7 +14,7 @@ void AppWdg_Init(void)
 {
     s_hiwdg.Instance = IWDG;
     s_hiwdg.Init.Prescaler = IWDG_PRESCALER_32;
-    s_hiwdg.Init.Reload = 1499U; /* nominal ~1.5 s; about 1.25-1.875 s if LSI is close to the ±20% spread referenced in the audit */
+    s_hiwdg.Init.Reload = 1499U; /* nominal ~1.5 s; about 1.25-1.875 s if LSI is close to the ±20% spread documented in docs/risk-audit/hardfault-risk-audit.md */
 
     if (HAL_IWDG_Init(&s_hiwdg) != HAL_OK) {
         NVIC_SystemReset();
