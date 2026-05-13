@@ -20,8 +20,7 @@ typedef struct {
 } fault_dump_t;
 
 __attribute__((section(".noinit"))) volatile fault_dump_t g_fault_dump;
-
-#define STM32F411_SRAM_END  (SRAM_BASE + (128UL * 1024UL))
+extern uint8_t _estack;
 
 static uint8_t Fault_IsValidStackPointer(const uint32_t *stack_ptr)
 {
@@ -31,7 +30,7 @@ static uint8_t Fault_IsValidStackPointer(const uint32_t *stack_ptr)
     if (addr < SRAM_BASE) {
         return 0U;
     }
-    if (end_addr > STM32F411_SRAM_END) {
+    if (end_addr > (uint32_t)&_estack) {
         return 0U;
     }
     if ((addr & 0x7U) != 0U) {

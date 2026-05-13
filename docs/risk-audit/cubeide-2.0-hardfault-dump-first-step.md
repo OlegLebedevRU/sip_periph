@@ -99,7 +99,7 @@
 
 #### Определить активный стек
 
-В окне **Registers** посмотреть `LR` (EXC_RETURN):
+В окне **Registers** посмотреть `LR` (EXC_RETURN, проверка бита 2 / маска `0x4`):
 
 - если `LR & 4 == 0` -> fault frame лежит в **MSP**
 - если `LR & 4 != 0` -> fault frame лежит в **PSP**

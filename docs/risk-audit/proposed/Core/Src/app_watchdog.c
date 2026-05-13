@@ -14,7 +14,7 @@ void AppWdg_Init(void)
 {
     s_hiwdg.Instance = IWDG;
     s_hiwdg.Init.Prescaler = IWDG_PRESCALER_32;
-    s_hiwdg.Init.Reload = 1499U; /* nominal ~1.5 s; about 1.25-1.875 s for the LSI spread used in the audit */
+    s_hiwdg.Init.Reload = 1499U; /* nominal ~1.5 s; about 1.25-1.875 s if LSI is close to the ±20% spread referenced in the audit */
 
     if (HAL_IWDG_Init(&s_hiwdg) != HAL_OK) {
         NVIC_SystemReset();
@@ -31,7 +31,7 @@ void AppWdg_RegisterTask(AppWdgTaskId id)
 void AppWdg_Kick(AppWdgTaskId id)
 {
     if ((uint32_t)id < (uint32_t)APP_WDG_TASK_MAX) {
-        __atomic_or_fetch(&s_task_alive_mask, (1UL << (uint32_t)id), __ATOMIC_RELAXED);
+        __atomic_or_fetch(&s_task_alive_mask, (1UL << (uint32_t)id), __ATOMIC_RELEASE);
     }
 }
 
@@ -55,7 +55,7 @@ void AppWdg_Task(void const *argument)
         osDelay(APP_WDG_FEED_PERIOD_MS);
         s_supervisor_beat++;
 
-        alive_mask = __atomic_load_n(&s_task_alive_mask, __ATOMIC_RELAXED);
+        alive_mask = __atomic_load_n(&s_task_alive_mask, __ATOMIC_ACQUIRE);
         all_alive = ((alive_mask & s_task_expected_mask) == s_task_expected_mask) ? 1U : 0U;
 
         if ((s_fast_probe_ok != 0U) && (all_alive != 0U)) {
