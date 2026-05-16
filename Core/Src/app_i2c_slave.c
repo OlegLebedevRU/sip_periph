@@ -791,10 +791,10 @@ void app_i2c_slave_publish(const I2cPacketToMaster_t *pckt)
     s_outbox_busy_since_tick = now;
     s_last_tx_reg = 0xFFU;
     s_last_tx_len = 0U;
-    HAL_GPIO_WritePin(PIN_EVENT_TO_ESP_GPIO_Port, PIN_EVENT_TO_ESP_Pin, GPIO_PIN_RESET);
     s_event_latched = 1U;
     s_event_low_since_tick = now;
     taskEXIT_CRITICAL();
+    HAL_GPIO_WritePin(PIN_EVENT_TO_ESP_GPIO_Port, PIN_EVENT_TO_ESP_Pin, GPIO_PIN_RESET);
 }
 
 void StartTaskRxTxI2c1(void const *argument)
@@ -811,7 +811,7 @@ void StartTaskRxTxI2c1(void const *argument)
     s_diag.relisten_count++;
     if (s_diag.boot_reset_reason != 0U) {
         snprintf(reset_reason_msg, sizeof(reset_reason_msg), "RST RSN:%04lu  ",
-                 (unsigned long)(s_diag.boot_reset_reason % 10000UL));
+                 (unsigned long)s_diag.boot_reset_reason);
         dwin_text_output(DWIN_STATUS_VP_ADDR, (const uint8_t*)reset_reason_msg, strlen(reset_reason_msg));
     }
 
@@ -820,7 +820,6 @@ void StartTaskRxTxI2c1(void const *argument)
         HAL_I2C_StateTypeDef i2c1_state;
         process_deferred_actions();
         if (xQueueReceive(myQueueToMasterHandle, &pckt, I2C_SLAVE_RXTX_IDLE_POLL_MS) != pdTRUE) {
-            process_deferred_actions();
             continue;
         }
         s_last_master_queue_activity_tick = tick_now();
