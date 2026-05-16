@@ -9,7 +9,7 @@ Synchronize IDE project configuration with the current repository state:
 - `.project` / `.cproject`,
 - `sip_periph.ioc` / `.mxproject`.
 
-## Prompt для агента
+## Prompt for Agent
 
 ```text
 You are working in repository OlegLebedevRU/sip_periph.
@@ -26,7 +26,7 @@ Requirements:
    - Debug/Release output paths
    - ELF path used by debug launcher
    - ST-Link/OpenOCD launch target points to this project
-6) If CubeMX regeneration is needed, regenerate and report exactly which generated files changed,
+6) If CubeMX regeneration is needed, regenerate and report exactly which generated files changed.
 7) Provide a short report:
    - what was synchronized
    - which config files changed
