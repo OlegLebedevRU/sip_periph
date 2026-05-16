@@ -1,11 +1,11 @@
 # IDE Agent Prompt: Sync Run/Debug + CubeMX `.ioc`
 
-Этот промт предназначен для **ручного запуска агента в IDE** после получения обновлений из репозитория.
+This prompt is intended for **manual IDE agent runs** after pulling updates from this repository.
 
-## Цель
+## Purpose
 
-Синхронизировать IDE-конфигурации проекта с актуальным состоянием репозитория:
-- run/debug конфигурации,
+Synchronize IDE project configuration with the current repository state:
+- run/debug configurations,
 - `.project` / `.cproject`,
 - `sip_periph.ioc` / `.mxproject`.
 
@@ -26,15 +26,15 @@ Requirements:
    - Debug/Release output paths
    - ELF path used by debug launcher
    - ST-Link/OpenOCD launch target points to this project
-6) If CubeMX regeneration is needed, regenerate and report exactly which generated files changed.
+6) If CubeMX regeneration is needed, regenerate and report exactly which generated files changed,
 7) Provide a short report:
    - what was synchronized
    - which config files changed
    - whether manual IDE action is still required.
 ```
 
-## Когда запускать
+## When to Run
 
-- После `git pull`/merge в локальную ветку.
-- После изменений в `sip_periph.ioc`, `.mxproject`, `.project`, `.cproject`.
-- После конфликтов/переноса workspace, когда run/debug профили в IDE перестали совпадать с проектом.
+- After `git pull` / merge into the local branch.
+- After changes in `sip_periph.ioc`, `.mxproject`, `.project`, or `.cproject`.
+- After workspace moves/conflicts when run/debug profiles in IDE are no longer aligned with the project.
