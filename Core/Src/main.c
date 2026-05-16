@@ -389,7 +389,7 @@ int main(void)
   rtos_require_alloc(myTask532Handle);
 
   /* definition and creation of myTaskRxTxI2c1 */
-  osThreadDef(myTaskRxTxI2c1, StartTaskRxTxI2c1, osPriorityAboveNormal, 0, 512);
+  osThreadDef(myTaskRxTxI2c1, StartTaskRxTxI2c1, osPriorityRealtime, 0, 512);
   myTaskRxTxI2c1Handle = osThreadCreate(osThread(myTaskRxTxI2c1), NULL);
   rtos_require_alloc(myTaskRxTxI2c1Handle);
 
@@ -419,7 +419,7 @@ int main(void)
   rtos_require_alloc(myTask_tca6408aHandle);
 
   /* definition and creation of myTaskI2cGuard — dedicated I2C1 bus health monitor */
-  osThreadDef(myTaskI2cGuard, StartTaskI2cGuard, osPriorityHigh, 0, 256);
+  osThreadDef(myTaskI2cGuard, StartTaskI2cGuard, osPriorityRealtime, 0, 256);
   myTaskI2cGuardHandle = osThreadCreate(osThread(myTaskI2cGuard), NULL);
   rtos_require_alloc(myTaskI2cGuardHandle);
 

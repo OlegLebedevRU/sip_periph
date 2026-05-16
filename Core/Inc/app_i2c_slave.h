@@ -27,14 +27,23 @@ typedef struct {
     uint32_t progress_timeout_count;
     uint32_t stuck_scl_count;
     uint32_t stuck_sda_count;
+    uint32_t outbox_timeout_count;
+    uint32_t event_low_timeout_count;
+    uint32_t queue_stall_count;
+    uint32_t dwin_stall_count;
+    uint32_t touch_stall_count;
     uint32_t abort_count;
     uint32_t relisten_count;
     uint32_t hard_recover_count;
+    uint32_t full_reinit_count;
+    uint32_t system_reset_count;
     uint32_t malformed_count;
     uint32_t recover_fail_count;
     uint32_t last_recovery_ms;
     uint32_t max_recovery_ms;
     uint32_t last_progress_tick;
+    uint32_t last_recovery_reason;
+    uint32_t boot_reset_reason;
 } app_i2c_slave_diag_t;
 
 void app_i2c_slave_init(void);
@@ -51,6 +60,8 @@ uint8_t app_i2c_slave_diag_line_count(void);
 void app_i2c_slave_publish(const I2cPacketToMaster_t *pckt);
 void StartTaskRxTxI2c1(void const *argument);
 void StartTaskI2cGuard(void const *argument);
+void app_i2c_slave_note_dwin_activity(void);
+void app_i2c_slave_note_touch_activity(void);
 
 /* HAL callback delegates */
 void app_i2c_slave_abort_complete(I2C_HandleTypeDef *hi2c);

@@ -13,6 +13,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include "queue.h"
 #include "main.h"
 #include "cmsis_os.h"
 #include "app_i2c_slave.h"
@@ -24,6 +25,7 @@
 extern I2C_HandleTypeDef hi2c1;
 extern osMessageQId myQueueToMasterHandle;
 extern osMessageQId myQueueHmiMsgHandle;
+extern osMessageQId myQueueHMIRecvRawHandle;
 extern osTimerId myTimerBuzzerOffHandle;
 
 /* ---- recovery policy ----------------------------------------------------- */
@@ -36,6 +38,45 @@ extern osTimerId myTimerBuzzerOffHandle;
 #define I2C_SLAVE_OUTBOX_RETRY_DELAY_MS  20U
 #define I2C_SLAVE_STUCK_CONFIRM_POLLS    3U
 #define I2C_SLAVE_STUCK_CONFIRM_MS       15U
+#define I2C_SLAVE_OUTBOX_TIMEOUT_MS      500U
+#define I2C_SLAVE_EVENT_LOW_TIMEOUT_MS   500U
+#define I2C_SLAVE_QUEUE_STALL_TIMEOUT_MS 500U
+#define I2C_SLAVE_DWIN_STALL_TIMEOUT_MS  5000U
+#define I2C_SLAVE_TOUCH_STALL_TIMEOUT_MS 1000U
+#define I2C_SLAVE_SOFT_RECOVERY_LIMIT    2U
+#define I2C_SLAVE_FULL_RECOVERY_LIMIT    4U
+#define I2C_SLAVE_NOINIT_MAGIC           0x49524331UL /* "IRC1" */
+
+/* ---- Deferred processing flags (ISR sets, task processes) -------------- */
+#define DEFERRED_NONE           0x00U
+#define DEFERRED_TIME_SYNC      0x01U
+#define DEFERRED_AUTH_RESULT    0x02U
+
+typedef enum {
+    I2C_RECOVERY_REASON_NONE = 0U,
+    I2C_RECOVERY_REASON_PHASE_TIMEOUT = 1U,
+    I2C_RECOVERY_REASON_STUCK_SCL = 2U,
+    I2C_RECOVERY_REASON_STUCK_SDA = 3U,
+    I2C_RECOVERY_REASON_MALFORMED = 4U,
+    I2C_RECOVERY_REASON_OUTBOX_TIMEOUT = 5U,
+    I2C_RECOVERY_REASON_EVENT_LOW_TIMEOUT = 6U,
+    I2C_RECOVERY_REASON_MASTER_QUEUE_STALL = 7U,
+    I2C_RECOVERY_REASON_DWIN_STALL = 8U,
+    I2C_RECOVERY_REASON_TOUCH_STALL = 9U,
+    I2C_RECOVERY_REASON_ABORT = 10U,
+    I2C_RECOVERY_REASON_HARD_LIMIT = 11U,
+} i2c_recovery_reason_t;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t boot_count;
+    uint32_t last_reset_reason;
+    uint32_t system_reset_count;
+    uint32_t full_reinit_count;
+    uint32_t hard_recover_count;
+    uint32_t outbox_timeout_count;
+    uint32_t queue_stall_count;
+} i2c_recovery_noinit_t;
 
 /* ---- local state -------------------------------------------------------- */
 static uint8_t s_ram[256];
@@ -74,10 +115,24 @@ static volatile uint8_t s_idle_scl_low_polls = 0U;
 static volatile uint8_t s_idle_sda_low_polls = 0U;
 static volatile uint32_t s_idle_scl_low_since_tick = 0U;
 static volatile uint32_t s_idle_sda_low_since_tick = 0U;
+static volatile uint8_t s_recovery_reason = I2C_RECOVERY_REASON_NONE;
+static volatile uint8_t s_recovery_attempts = 0U;
+static volatile uint32_t s_outbox_busy_since_tick = 0U;
+static volatile uint32_t s_event_low_since_tick = 0U;
+static volatile uint32_t s_last_master_queue_activity_tick = 0U;
+static volatile uint32_t s_last_dwin_activity_tick = 0U;
+static volatile uint32_t s_last_touch_activity_tick = 0U;
+static volatile uint8_t s_dwin_watchdog_armed = 0U;
+static volatile uint8_t s_touch_watchdog_armed = 0U;
+static volatile uint8_t s_deferred_action = DEFERRED_NONE;
+__attribute__((section(".noinit"))) static volatile i2c_recovery_noinit_t s_noinit_recovery;
 static app_i2c_slave_diag_t s_diag = {0};
 
 /* ---- forward declarations ----------------------------------------------- */
 static void process_deferred_actions(void);
+static void schedule_recovery(i2c_recovery_reason_t reason);
+static void full_service_reinit(void);
+static void persist_reset_reason(i2c_recovery_reason_t reason);
 
 /* ---- internal helpers --------------------------------------------------- */
 static uint32_t tick_now(void)
@@ -90,12 +145,27 @@ static uint8_t tick_expired(uint32_t now, uint32_t deadline)
     return (deadline != 0U) && ((int32_t)(now - deadline) >= 0);
 }
 
+static void init_noinit_diag(void)
+{
+    if (s_noinit_recovery.magic != I2C_SLAVE_NOINIT_MAGIC) {
+        memset((void*)&s_noinit_recovery, 0, sizeof(s_noinit_recovery));
+        s_noinit_recovery.magic = I2C_SLAVE_NOINIT_MAGIC;
+    }
+    s_noinit_recovery.boot_count++;
+}
+
+static void persist_reset_reason(i2c_recovery_reason_t reason)
+{
+    s_noinit_recovery.last_reset_reason = (uint32_t)reason;
+}
+
 static void note_progress(uint32_t timeout_ms)
 {
     uint32_t now = tick_now();
     s_last_progress_tick = now;
     s_phase_deadline_tick = now + timeout_ms;
     s_diag.last_progress_tick = now;
+    s_recovery_attempts = 0U;
 }
 
 static void clear_progress_watchdog(void)
@@ -131,7 +201,7 @@ static void note_recovery_duration(void)
 static void mark_malformed_and_recover(void)
 {
     s_diag.malformed_count++;
-    s_recovery_pending = 1U;
+    schedule_recovery(I2C_RECOVERY_REASON_MALFORMED);
 }
 
 static uint8_t packet_reg_for_type(I2cPacketType_t type)
@@ -207,6 +277,7 @@ static void force_idle_event_line(void)
 {
     HAL_GPIO_WritePin(PIN_EVENT_TO_ESP_GPIO_Port, PIN_EVENT_TO_ESP_Pin, GPIO_PIN_SET);
     s_event_latched = 0U;
+    s_event_low_since_tick = tick_now();
 }
 
 static void reset_fsm_state(void)
@@ -221,6 +292,7 @@ static void reset_fsm_state(void)
 static void outbox_complete_ack(void)
 {
     s_outbox_busy = 0U;
+    s_outbox_busy_since_tick = tick_now();
     s_outbox_type = PACKET_NULL;
     s_outbox_reg  = I2C_PACKET_TYPE_ADDR;
     s_outbox_len  = 0U;
@@ -256,6 +328,7 @@ static void hard_recover_bus(void)
 {
     recover_after_error();
     s_diag.hard_recover_count++;
+    s_noinit_recovery.hard_recover_count++;
     s_recovery_started_tick = tick_now();
     HAL_I2C_DeInit(&hi2c1);
     osDelay(I2C_SLAVE_RECOVERY_COOLDOWN_MS);
@@ -272,11 +345,37 @@ static void hard_recover_bus(void)
     }
 }
 
+static void full_service_reinit(void)
+{
+    if (myQueueToMasterHandle != NULL) {
+        xQueueReset((QueueHandle_t)myQueueToMasterHandle);
+    }
+    if (myQueueHmiMsgHandle != NULL) {
+        xQueueReset((QueueHandle_t)myQueueHmiMsgHandle);
+    }
+    if (myQueueHMIRecvRawHandle != NULL) {
+        xQueueReset((QueueHandle_t)myQueueHMIRecvRawHandle);
+    }
+    s_deferred_action = DEFERRED_NONE;
+    recover_after_error();
+    s_diag.full_reinit_count++;
+    s_noinit_recovery.full_reinit_count++;
+}
+
+static void schedule_recovery(i2c_recovery_reason_t reason)
+{
+    if (s_recovery_pending == 0U || s_recovery_reason == I2C_RECOVERY_REASON_NONE) {
+        s_recovery_reason = (uint8_t)reason;
+    }
+    s_diag.last_recovery_reason = s_recovery_reason;
+    s_recovery_started_tick = tick_now();
+    s_recovery_pending = 1U;
+}
+
 static void schedule_abort_recovery(void)
 {
     s_diag.abort_count++;
-    s_recovery_started_tick = tick_now();
-    s_recovery_pending = 1U;
+    schedule_recovery(I2C_RECOVERY_REASON_ABORT);
 }
 
 static void poll_bus_health(void)
@@ -284,16 +383,50 @@ static void poll_bus_health(void)
     uint32_t now = tick_now();
     uint8_t scl_low = i2c1_line_is_low(GPIO_PIN_6);
     uint8_t sda_low = i2c1_line_is_low(GPIO_PIN_7);
-    HAL_I2C_StateTypeDef state = HAL_I2C_GetState(&hi2c1);
+    UBaseType_t queue_depth = uxQueueMessagesWaiting((QueueHandle_t)myQueueToMasterHandle);
+    UBaseType_t touch_depth = uxQueueMessagesWaiting((QueueHandle_t)myQueueHMIRecvRawHandle);
 
     if (tick_expired(now, s_phase_deadline_tick)) {
         s_diag.progress_timeout_count++;
-        schedule_abort_recovery();
+        schedule_recovery(I2C_RECOVERY_REASON_PHASE_TIMEOUT);
         clear_progress_watchdog();
         return;
     }
 
-    if (((state & 0xFFU) == HAL_I2C_STATE_LISTEN) && tick_expired(now, s_last_progress_tick + I2C_SLAVE_IDLE_STUCK_TIMEOUT_MS)) {
+    if ((s_outbox_busy != 0U) && tick_expired(now, s_outbox_busy_since_tick + I2C_SLAVE_OUTBOX_TIMEOUT_MS)) {
+        s_diag.outbox_timeout_count++;
+        s_noinit_recovery.outbox_timeout_count++;
+        schedule_recovery(I2C_RECOVERY_REASON_OUTBOX_TIMEOUT);
+        return;
+    }
+
+    if ((s_event_latched != 0U) && tick_expired(now, s_event_low_since_tick + I2C_SLAVE_EVENT_LOW_TIMEOUT_MS)) {
+        s_diag.event_low_timeout_count++;
+        schedule_recovery(I2C_RECOVERY_REASON_EVENT_LOW_TIMEOUT);
+        return;
+    }
+
+    if ((queue_depth > 0U) && tick_expired(now, s_last_master_queue_activity_tick + I2C_SLAVE_QUEUE_STALL_TIMEOUT_MS)) {
+        s_diag.queue_stall_count++;
+        s_noinit_recovery.queue_stall_count++;
+        schedule_recovery(I2C_RECOVERY_REASON_MASTER_QUEUE_STALL);
+        return;
+    }
+
+    if ((s_dwin_watchdog_armed != 0U) && tick_expired(now, s_last_dwin_activity_tick + I2C_SLAVE_DWIN_STALL_TIMEOUT_MS)) {
+        s_diag.dwin_stall_count++;
+        schedule_recovery(I2C_RECOVERY_REASON_DWIN_STALL);
+        return;
+    }
+
+    if ((touch_depth > 0U) && (s_touch_watchdog_armed != 0U)
+            && tick_expired(now, s_last_touch_activity_tick + I2C_SLAVE_TOUCH_STALL_TIMEOUT_MS)) {
+        s_diag.touch_stall_count++;
+        schedule_recovery(I2C_RECOVERY_REASON_TOUCH_STALL);
+        return;
+    }
+
+    if (tick_expired(now, s_last_progress_tick + I2C_SLAVE_IDLE_STUCK_TIMEOUT_MS)) {
         if (scl_low != 0U) {
             if (s_idle_scl_low_polls == 0U) {
                 s_idle_scl_low_since_tick = now;
@@ -323,7 +456,7 @@ static void poll_bus_health(void)
             s_diag.stuck_scl_count++;
             s_idle_scl_low_polls = 0U;
             s_idle_scl_low_since_tick = 0U;
-            schedule_abort_recovery();
+            schedule_recovery(I2C_RECOVERY_REASON_STUCK_SCL);
             return;
         }
         if ((s_idle_sda_low_polls >= I2C_SLAVE_STUCK_CONFIRM_POLLS)
@@ -331,7 +464,7 @@ static void poll_bus_health(void)
             s_diag.stuck_sda_count++;
             s_idle_sda_low_polls = 0U;
             s_idle_sda_low_since_tick = 0U;
-            schedule_abort_recovery();
+            schedule_recovery(I2C_RECOVERY_REASON_STUCK_SDA);
         }
         return;
     }
@@ -343,11 +476,30 @@ static void poll_bus_health(void)
 }
 static void execute_pending_recovery(void)
 {
+    i2c_recovery_reason_t reason;
+
     if (s_recovery_pending == 0U) {
         return;
     }
 
     s_recovery_pending = 0U;
+    reason = (i2c_recovery_reason_t)s_recovery_reason;
+    s_recovery_reason = I2C_RECOVERY_REASON_NONE;
+    s_diag.last_recovery_reason = (uint32_t)reason;
+    s_recovery_attempts++;
+
+    if (s_recovery_attempts > I2C_SLAVE_FULL_RECOVERY_LIMIT) {
+        s_diag.system_reset_count++;
+        s_noinit_recovery.system_reset_count++;
+        persist_reset_reason(reason);
+        NVIC_SystemReset();
+        return;
+    }
+
+    if (s_recovery_attempts > I2C_SLAVE_SOFT_RECOVERY_LIMIT) {
+        full_service_reinit();
+    }
+
     /* HAL_I2C_Slave_Abort_IT is not available on F4 HAL, falling back to hard reset */
     hard_recover_bus();
 }
@@ -355,10 +507,28 @@ static void execute_pending_recovery(void)
 /* ---- public API --------------------------------------------------------- */
 void app_i2c_slave_init(void)
 {
+    uint32_t now = tick_now();
+    init_noinit_diag();
     memset(s_ram, 0, sizeof(s_ram));
     memset(&s_diag, 0, sizeof(s_diag));
     recover_after_error();
     reset_fsm_state();
+    s_recovery_reason = I2C_RECOVERY_REASON_NONE;
+    s_recovery_attempts = 0U;
+    s_outbox_busy_since_tick = now;
+    s_event_low_since_tick = now;
+    s_last_master_queue_activity_tick = now;
+    s_last_dwin_activity_tick = now;
+    s_last_touch_activity_tick = now;
+    s_dwin_watchdog_armed = 0U;
+    s_touch_watchdog_armed = 0U;
+    s_diag.outbox_timeout_count = s_noinit_recovery.outbox_timeout_count;
+    s_diag.queue_stall_count = s_noinit_recovery.queue_stall_count;
+    s_diag.full_reinit_count = s_noinit_recovery.full_reinit_count;
+    s_diag.system_reset_count = s_noinit_recovery.system_reset_count;
+    s_diag.hard_recover_count = s_noinit_recovery.hard_recover_count;
+    s_diag.boot_reset_reason = s_noinit_recovery.last_reset_reason;
+    s_diag.last_recovery_reason = s_noinit_recovery.last_reset_reason;
     /* Do NOT set an aggressive deadline here — guard task is already running.
      * Progress watchdog activates on first real I2C addr_callback. */
     clear_progress_watchdog();
@@ -390,6 +560,18 @@ void app_i2c_slave_poll_recovery(void)
     execute_pending_recovery();
 }
 
+void app_i2c_slave_note_dwin_activity(void)
+{
+    s_last_dwin_activity_tick = tick_now();
+    s_dwin_watchdog_armed = 1U;
+}
+
+void app_i2c_slave_note_touch_activity(void)
+{
+    s_last_touch_activity_tick = tick_now();
+    s_touch_watchdog_armed = 1U;
+}
+
 /* ---- diag export to I2C RAM 0xF0..0xFF --------------------------------- */
 /*
  * Layout (16 bytes at I2C_REG_STM32_ERROR_ADDR = 0xF0):
@@ -406,7 +588,7 @@ void app_i2c_slave_poll_recovery(void)
  *   [12] HAL I2C1 state
  *   [13] SCL pin level
  *   [14] SDA pin level
- *   [15] reserved (0)
+ *   [15] last_recovery_reason (low byte)
  */
 static uint8_t sat8(uint32_t v) { return (v > 255U) ? 255U : (uint8_t)v; }
 
@@ -430,7 +612,7 @@ void app_i2c_slave_sync_diag_to_ram(void)
     base[12] = (uint8_t)(HAL_I2C_GetState(&hi2c1) & 0xFFU);
     base[13] = (uint8_t)HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_6);
     base[14] = (uint8_t)HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_7);
-    base[15] = 0U;
+    base[15] = (uint8_t)(s_diag.last_recovery_reason & 0xFFU);
 }
 
 uint8_t app_i2c_slave_has_errors(void)
@@ -438,7 +620,14 @@ uint8_t app_i2c_slave_has_errors(void)
     return (s_diag.progress_timeout_count
           + s_diag.stuck_scl_count
           + s_diag.stuck_sda_count
+          + s_diag.outbox_timeout_count
+          + s_diag.event_low_timeout_count
+          + s_diag.queue_stall_count
+          + s_diag.dwin_stall_count
+          + s_diag.touch_stall_count
           + s_diag.hard_recover_count
+          + s_diag.full_reinit_count
+          + s_diag.system_reset_count
           + s_diag.malformed_count
           + s_diag.recover_fail_count) > 0U ? 1U : 0U;
 }
@@ -473,7 +662,6 @@ void StartTaskI2cGuard(void const *argument)
     (void)argument;
     for (;;) {
         app_i2c_slave_poll_recovery();
-        process_deferred_actions();
         app_i2c_slave_sync_diag_to_ram();
         osDelay(5);
     }
@@ -519,12 +707,6 @@ static void process_auth_result_write(void)
         /* AUTH_RESULT_BUSY and any unknown future values are accepted with no side effects. */
     }
 }
-
-/* ---- Deferred processing flags (ISR sets, task processes) -------------- */
-#define DEFERRED_NONE           0x00U
-#define DEFERRED_TIME_SYNC      0x01U
-#define DEFERRED_AUTH_RESULT    0x02U
-static volatile uint8_t s_deferred_action = DEFERRED_NONE;
 
 static void process_register_write_from_isr(uint8_t base, BaseType_t *prior)
 {
@@ -573,6 +755,8 @@ void app_i2c_slave_publish(const I2cPacketToMaster_t *pckt)
 {
     uint8_t target_reg;
     uint8_t target_len;
+    uint32_t now = tick_now();
+    uint32_t primask;
 
     if (pckt == NULL) {
         return;
@@ -581,6 +765,8 @@ void app_i2c_slave_publish(const I2cPacketToMaster_t *pckt)
     target_reg = packet_reg_for_type(pckt->type);
     target_len = packet_len_for_type(pckt->type, pckt->len);
 
+    primask = __get_PRIMASK();
+    __disable_irq();
     s_ram[I2C_PACKET_TYPE_ADDR] = (uint8_t)pckt->type;
     if ((target_len > 0U) && (pckt->payload != NULL)) {
         memset(&s_ram[target_reg], 0, target_len);
@@ -591,16 +777,22 @@ void app_i2c_slave_publish(const I2cPacketToMaster_t *pckt)
     s_outbox_type = (uint8_t)pckt->type;
     s_outbox_reg  = target_reg;
     s_outbox_len  = target_len;
+    s_outbox_busy_since_tick = now;
     s_last_tx_reg = 0xFFU;
     s_last_tx_len = 0U;
     HAL_GPIO_WritePin(PIN_EVENT_TO_ESP_GPIO_Port, PIN_EVENT_TO_ESP_Pin, GPIO_PIN_RESET);
     s_event_latched = 1U;
+    s_event_low_since_tick = now;
+    if (primask == 0U) {
+        __enable_irq();
+    }
 }
 
 void StartTaskRxTxI2c1(void const *argument)
 {
     I2cPacketToMaster_t pckt;
     const char *bus_error_msg = "BUS ERROR       ";  /* padded to 16 chars for VP 0x5200 */
+    char reset_reason_msg[17];
     (void)argument;
 
     app_i2c_slave_poll_recovery();
@@ -608,11 +800,21 @@ void StartTaskRxTxI2c1(void const *argument)
         Error_Handler();
     }
     s_diag.relisten_count++;
+    if (s_diag.boot_reset_reason != 0U) {
+        snprintf(reset_reason_msg, sizeof(reset_reason_msg), "RST RSN:%02lu    ",
+                 (unsigned long)(s_diag.boot_reset_reason % 100UL));
+        dwin_text_output(0x5200U, (const uint8_t*)reset_reason_msg, strlen(reset_reason_msg));
+    }
 
     for (;;) {
         uint16_t count = 0U;
         HAL_I2C_StateTypeDef i2c1_state;
-        xQueueReceive(myQueueToMasterHandle, &pckt, osWaitForever);
+        process_deferred_actions();
+        if (xQueueReceive(myQueueToMasterHandle, &pckt, 20U) != pdTRUE) {
+            process_deferred_actions();
+            continue;
+        }
+        s_last_master_queue_activity_tick = tick_now();
 
         /* Release the TIME-packet coalesce slot as soon as the entry is
          * dequeued so that the next 1Hz tick can re-arm immediately. */
