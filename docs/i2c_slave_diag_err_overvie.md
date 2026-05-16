@@ -44,7 +44,19 @@
 | `[12]` | HAL I2C1 state | Текущее состояние HAL-автомата (`HAL_I2C_STATE_LISTEN`, `BUSY_TX`, `BUSY_RX` и т.д.). Позволяет мастеру понять, не завис ли slave в промежуточной фазе. |
 | `[13]` | SCL pin level | Физический уровень SCL (0=LOW, 1=HIGH). В покое должен быть HIGH. |
 | `[14]` | SDA pin level | Физический уровень SDA. В покое должен быть HIGH. |
-| `[15]` | reserved | Зарезервировано, всегда 0. |
+| `[15]` | `last_recovery_reason` | Код причины последнего watchdog/recovery (enum из `app_i2c_slave.c`). |
+
+Код `[15]` экспортируется числом (внутренний `static enum` в `app_i2c_slave.c`), текущие значения:
+- `1` — timeout фазы (`s_phase_deadline_tick`)
+- `2` — stuck SCL
+- `3` — stuck SDA
+- `4` — malformed request
+- `5` — timeout `s_outbox_busy`
+- `6` — EVENT pin stuck LOW
+- `7` — stall очереди `myQueueToMasterHandle`
+- `8` — stall обновлений DWIN
+- `9` — stall обработки touch-событий
+- `10` — abort/error path recovery
 
 ### Как использовать
 
@@ -80,6 +92,11 @@ I2C1 slave-обёртка протокола с антизалипающими �
 | `I2C_SLAVE_OUTBOX_RETRY_DELAY_MS` | 20 мс | Шаг ожидания при занятом outbox |
 | `I2C_SLAVE_STUCK_CONFIRM_POLLS` | 3 | Минимум подряд опросов LOW перед фиксацией stuck |
 | `I2C_SLAVE_STUCK_CONFIRM_MS` | 15 мс | Минимальное окно LOW перед фиксацией stuck |
+| `I2C_SLAVE_OUTBOX_TIMEOUT_MS` | 500 мс | Дедлайн для `s_outbox_busy != 0`, после которого запускается аварийное восстановление |
+| `I2C_SLAVE_EVENT_LOW_TIMEOUT_MS` | 500 мс | Дедлайн удержания EVENT в LOW |
+| `I2C_SLAVE_QUEUE_STALL_TIMEOUT_MS` | 500 мс | Дедлайн «очередь не осушается» для `myQueueToMasterHandle` |
+| `I2C_SLAVE_DWIN_STALL_TIMEOUT_MS` | 5000 мс | Дедлайн отсутствия обновления DWIN-индикатора времени |
+| `I2C_SLAVE_TOUCH_STALL_TIMEOUT_MS` | 1000 мс | Дедлайн обслуживания входящих touch-событий (при наличии очереди) |
 
 ---
 
@@ -135,7 +152,7 @@ I2C1 slave-обёртка протокола с антизалипающими �
 | `i2c1_line_is_low(pin)` | Читает физический уровень SCL/SDA |
 | `note_recovery_duration()` | Вычисляет длительность восстановления, обновляет `last/max_recovery_ms` |
 | `mark_malformed_and_recover()` | Инкрементирует `malformed_count`, ставит флаг recovery |
-| `poll_bus_health()` | Проверяет timeout прогресса и подтверждённый stuck bus в `LISTEN idle`; для LOW теперь требуется debounce/confirmation |
+| `poll_bus_health()` | Проверяет timeout прогресса, stuck bus, outbox/event timeout, stall очередей и heartbeat DWIN/touch |
 
 #### Протокол
 
@@ -164,7 +181,7 @@ I2C1 slave-обёртка протокола с антизалипающими �
 | `hard_recover_bus()` | Полный цикл: DeInit → delay → Init → EnableListen\_IT |
 | `schedule_abort_recovery()` | Инкрементирует `abort_count`, ставит `s_recovery_pending = 1` |
 | `poll_bus_health()` | Проверяет дедлайн прогресса и залипание SCL/SDA в LISTEN |
-| `execute_pending_recovery()` | Если `s_recovery_pending` → вызывает `hard_recover_bus()` |
+| `execute_pending_recovery()` | Каскад восстановления: soft I2C1 recover → full reinit очередей/FSM → `NVIC_SystemReset()` после лимита попыток |
 
 ---
 
@@ -206,14 +223,13 @@ I2C1 slave-обёртка протокола с антизалипающими �
 
 Периодическая задача (period ≈ 5 мс):
 1. `app_i2c_slave_poll_recovery()` — проверка здоровья шины, исполнение отложенного восстановления
-2. `process_deferred_actions()` — выполнение действий, отложенных из ISR (time sync, auth result)
-3. `app_i2c_slave_sync_diag_to_ram()` — обновление диагностического снимка в RAM
+2. `app_i2c_slave_sync_diag_to_ram()` — обновление диагностического снимка в RAM
 
 #### `StartTaskRxTxI2c1`
 
 Основная задача обработки исходящих пакетов:
 1. Запускает Listen при старте
-2. Ждёт пакет из `myQueueToMasterHandle`
+2. Ждёт пакет из `myQueueToMasterHandle` с коротким timeout и в idle-окне обслуживает `process_deferred_actions()`
 3. Дожидается состояния LISTEN (с recovery при зацикливании >20 попыток)
 4. Дожидается освобождения outbox
 5. Делает `I2C_SLAVE_PUBLISH_PRE_DELAY_MS`

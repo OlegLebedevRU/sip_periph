@@ -24,6 +24,7 @@ Current, normative device-level communication contracts.
 |---|---|---|
 | [`gm810_integration_plan_2026-04-23.md`](gm810_integration_plan_2026-04-23.md) | GM810 touch integration plan (2026-04-23) | **plan** |
 | [`dwin_tx_stage3_plan_2026-03-26.md`](dwin_tx_stage3_plan_2026-03-26.md) | DWIN TX stage 3 implementation plan (2026-03-26) | **plan** |
+| [`ide_agent_sync_prompt.md`](ide_agent_sync_prompt.md) | Prompt for manual IDE agent sync of run/debug + CubeMX project config | **active** |
 
 ---
 

@@ -211,6 +211,7 @@ void dwin_text_output(const uint16_t inaddr, const uint8_t *text_to_hmi,
 	}
 	memcpy(frame + HMI_TX_FRAME_OVERHEAD, (const void*) text_to_hmi, len);
 	dwin_tx_send(frame, (uint16_t)(len + HMI_TX_FRAME_OVERHEAD));
+	app_i2c_slave_note_dwin_activity();
 }
 
 /* Fixed-width output to page0_input_widget — pads with 0xFF to prevent
@@ -279,6 +280,7 @@ void StartTaskHmi(void const *argument) {
 			dwin_buf_free(uart_msg.uart_buf);
 			continue;
 		}
+		app_i2c_slave_note_touch_activity();
 
 		/* ---- LOCKED state: only clear command passes through ---- */
 		if (msg_hmi.hmi_lock == LOCKED) {
@@ -383,6 +385,7 @@ static void dwin_timer_output(const char *text, size_t textlen)
 		memset(&buf[textlen], ' ', DWIN_TIMER_FIELD_LEN - textlen);
 	}
 	dwin_text_output(DWIN_TIMER_VP_ADDR, buf, DWIN_TIMER_FIELD_LEN);
+	app_i2c_slave_note_dwin_activity();
 }
 
 /* Clear the entire timer VP with spaces */
@@ -391,6 +394,7 @@ static void dwin_timer_clear(void)
 	uint8_t buf[DWIN_TIMER_FIELD_LEN];
 	memset(buf, ' ', DWIN_TIMER_FIELD_LEN);
 	dwin_text_output(DWIN_TIMER_VP_ADDR, buf, DWIN_TIMER_FIELD_LEN);
+	app_i2c_slave_note_dwin_activity();
 }
 
 void StartTaskHmiMsg(void const *argument) {
