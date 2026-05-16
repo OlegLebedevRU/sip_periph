@@ -46,6 +46,18 @@
 | `[14]` | SDA pin level | Физический уровень SDA. В покое должен быть HIGH. |
 | `[15]` | `last_recovery_reason` | Код причины последнего watchdog/recovery (enum из `app_i2c_slave.c`). |
 
+Код `[15]` экспортируется числом (внутренний `static enum` в `app_i2c_slave.c`), текущие значения:
+- `1` — timeout фазы (`s_phase_deadline_tick`)
+- `2` — stuck SCL
+- `3` — stuck SDA
+- `4` — malformed request
+- `5` — timeout `s_outbox_busy`
+- `6` — EVENT pin stuck LOW
+- `7` — stall очереди `myQueueToMasterHandle`
+- `8` — stall обновлений DWIN
+- `9` — stall обработки touch-событий
+- `10` — abort/error path recovery
+
 ### Как использовать
 
 Мастер (ESP) периодически читает регистр `0xF0` (16 байт). Если `[0]`,`[1]`,`[2]`,`[5]`,`[6]`,`[7]` ненулевые — на шине были проблемы. Если `[13]` или `[14]` показывают LOW при `[12]` = LISTEN — шина залипла прямо сейчас.

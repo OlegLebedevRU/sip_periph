@@ -43,9 +43,12 @@ extern osTimerId myTimerBuzzerOffHandle;
 #define I2C_SLAVE_QUEUE_STALL_TIMEOUT_MS 500U
 #define I2C_SLAVE_DWIN_STALL_TIMEOUT_MS  5000U
 #define I2C_SLAVE_TOUCH_STALL_TIMEOUT_MS 1000U
+#define I2C_SLAVE_RXTX_IDLE_POLL_MS      20U
+#define I2C_SLAVE_PRE_RESET_DELAY_MS     20U
 #define I2C_SLAVE_SOFT_RECOVERY_LIMIT    2U
 #define I2C_SLAVE_FULL_RECOVERY_LIMIT    4U
 #define I2C_SLAVE_NOINIT_MAGIC           0x49524331UL /* "IRC1" */
+#define DWIN_STATUS_VP_ADDR              0x5200U
 
 /* ---- Deferred processing flags (ISR sets, task processes) -------------- */
 #define DEFERRED_NONE           0x00U
@@ -125,6 +128,10 @@ static volatile uint32_t s_last_touch_activity_tick = 0U;
 static volatile uint8_t s_dwin_watchdog_armed = 0U;
 static volatile uint8_t s_touch_watchdog_armed = 0U;
 static volatile uint8_t s_deferred_action = DEFERRED_NONE;
+/* NOTE: .noinit section is used intentionally so watchdog/reset counters survive
+ * NVIC_SystemReset(). Verify startup/linker keep this section out of zero-init
+ * paths (STM32F411CEUX_FLASH.ld / STM32F411CEUX_RAM.ld + startup_stm32f411ceux.s),
+ * otherwise persistence degrades to best-effort only. */
 __attribute__((section(".noinit"))) static volatile i2c_recovery_noinit_t s_noinit_recovery;
 static app_i2c_slave_diag_t s_diag = {0};
 
@@ -383,8 +390,8 @@ static void poll_bus_health(void)
     uint32_t now = tick_now();
     uint8_t scl_low = i2c1_line_is_low(GPIO_PIN_6);
     uint8_t sda_low = i2c1_line_is_low(GPIO_PIN_7);
-    UBaseType_t queue_depth = uxQueueMessagesWaiting((QueueHandle_t)myQueueToMasterHandle);
-    UBaseType_t touch_depth = uxQueueMessagesWaiting((QueueHandle_t)myQueueHMIRecvRawHandle);
+    UBaseType_t queue_depth = 0U;
+    UBaseType_t touch_depth = 0U;
 
     if (tick_expired(now, s_phase_deadline_tick)) {
         s_diag.progress_timeout_count++;
@@ -406,6 +413,7 @@ static void poll_bus_health(void)
         return;
     }
 
+    queue_depth = uxQueueMessagesWaiting((QueueHandle_t)myQueueToMasterHandle);
     if ((queue_depth > 0U) && tick_expired(now, s_last_master_queue_activity_tick + I2C_SLAVE_QUEUE_STALL_TIMEOUT_MS)) {
         s_diag.queue_stall_count++;
         s_noinit_recovery.queue_stall_count++;
@@ -419,7 +427,10 @@ static void poll_bus_health(void)
         return;
     }
 
-    if ((touch_depth > 0U) && (s_touch_watchdog_armed != 0U)
+    if (s_touch_watchdog_armed != 0U) {
+        touch_depth = uxQueueMessagesWaiting((QueueHandle_t)myQueueHMIRecvRawHandle);
+    }
+    if ((touch_depth > 0U)
             && tick_expired(now, s_last_touch_activity_tick + I2C_SLAVE_TOUCH_STALL_TIMEOUT_MS)) {
         s_diag.touch_stall_count++;
         schedule_recovery(I2C_RECOVERY_REASON_TOUCH_STALL);
@@ -492,6 +503,8 @@ static void execute_pending_recovery(void)
         s_diag.system_reset_count++;
         s_noinit_recovery.system_reset_count++;
         persist_reset_reason(reason);
+        app_i2c_slave_sync_diag_to_ram();
+        osDelay(I2C_SLAVE_PRE_RESET_DELAY_MS);
         NVIC_SystemReset();
         return;
     }
@@ -756,7 +769,6 @@ void app_i2c_slave_publish(const I2cPacketToMaster_t *pckt)
     uint8_t target_reg;
     uint8_t target_len;
     uint32_t now = tick_now();
-    uint32_t primask;
 
     if (pckt == NULL) {
         return;
@@ -765,8 +777,7 @@ void app_i2c_slave_publish(const I2cPacketToMaster_t *pckt)
     target_reg = packet_reg_for_type(pckt->type);
     target_len = packet_len_for_type(pckt->type, pckt->len);
 
-    primask = __get_PRIMASK();
-    __disable_irq();
+    taskENTER_CRITICAL();
     s_ram[I2C_PACKET_TYPE_ADDR] = (uint8_t)pckt->type;
     if ((target_len > 0U) && (pckt->payload != NULL)) {
         memset(&s_ram[target_reg], 0, target_len);
@@ -783,9 +794,7 @@ void app_i2c_slave_publish(const I2cPacketToMaster_t *pckt)
     HAL_GPIO_WritePin(PIN_EVENT_TO_ESP_GPIO_Port, PIN_EVENT_TO_ESP_Pin, GPIO_PIN_RESET);
     s_event_latched = 1U;
     s_event_low_since_tick = now;
-    if (primask == 0U) {
-        __enable_irq();
-    }
+    taskEXIT_CRITICAL();
 }
 
 void StartTaskRxTxI2c1(void const *argument)
@@ -801,16 +810,16 @@ void StartTaskRxTxI2c1(void const *argument)
     }
     s_diag.relisten_count++;
     if (s_diag.boot_reset_reason != 0U) {
-        snprintf(reset_reason_msg, sizeof(reset_reason_msg), "RST RSN:%02lu    ",
-                 (unsigned long)(s_diag.boot_reset_reason % 100UL));
-        dwin_text_output(0x5200U, (const uint8_t*)reset_reason_msg, strlen(reset_reason_msg));
+        snprintf(reset_reason_msg, sizeof(reset_reason_msg), "RST RSN:%04lu  ",
+                 (unsigned long)(s_diag.boot_reset_reason % 10000UL));
+        dwin_text_output(DWIN_STATUS_VP_ADDR, (const uint8_t*)reset_reason_msg, strlen(reset_reason_msg));
     }
 
     for (;;) {
         uint16_t count = 0U;
         HAL_I2C_StateTypeDef i2c1_state;
         process_deferred_actions();
-        if (xQueueReceive(myQueueToMasterHandle, &pckt, 20U) != pdTRUE) {
+        if (xQueueReceive(myQueueToMasterHandle, &pckt, I2C_SLAVE_RXTX_IDLE_POLL_MS) != pdTRUE) {
             process_deferred_actions();
             continue;
         }
