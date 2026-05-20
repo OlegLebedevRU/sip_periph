@@ -52,6 +52,7 @@ Current, normative device-level communication contracts.
 | [`i2c_time_reliability_report_2026-03-24.md`](i2c_time_reliability_report_2026-03-24.md) | I²C time reliability report (2026-03-24) | **archived** |
 | [`stm32_i2c_bus_checkup.md`](stm32_i2c_bus_checkup.md) | STM32 I²C bus health check procedure | **archived** |
 | [`tca6408_integration.md`](tca6408_integration.md) | TCA6408A integration notes | **archived** |
+| [`risk-audit/i2c1-slave-txe-isr-livelock-diagnosis.md`](risk-audit/i2c1-slave-txe-isr-livelock-diagnosis.md) | Диагностика ISR-level livelock в `I2C1_EV_IRQn` (TXE/BUSY/TRA, clock stretching) | **active** |
 
 ---
 
