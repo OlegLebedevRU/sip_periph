@@ -1,6 +1,6 @@
 # STM32F411 I2C1 slave TXE ISR livelock — диагностика зависания
 
-Repository: `OlegLebedevRU/sip_periph`  
+Repository: `sip_periph`  
 Контекст: пост-фактум диагностика зависания, зафиксированного после PR #21 (`Harden I2C1 anti-hang path with multilayer watchdogs and staged STM32 recovery escalation`).
 
 ---
@@ -160,7 +160,7 @@ PR #21 добавил полезные task-level watchdog/recovery слои, н
 
 ## Следующие инженерные меры (рекомендации для будущего PR, не реализация в этом документе)
 
-1. Включить аппаратный `IWDG`; выполнять `IWDG refresh` только из task/supervisor context (не из ISR).
+1. Включить аппаратный `IWDG`; выполнять `IWDG refresh` только из task/supervisor context (не из ISR), в соответствии с правилом ISR-safe API (в ISR использовать только `*FromISR` и не выполнять task-level recovery прямо в обработчике).
 2. Добавить ISR-level guard в `I2C1_EV_IRQHandler` на патологическое состояние `TXE + TRA + BUSY`:
    - guard должен быть lightweight и не выполнять тяжёлое восстановление внутри IRQ;
    - сигнал в отложенный контекст передавать через `xTaskNotifyFromISR` (supervisor task) или recovery queue event;
@@ -169,9 +169,9 @@ PR #21 добавил полезные task-level watchdog/recovery слои, н
    - дополнительно добавить pre-condition проверки перед включением `ITBUFEN`.
 3. В `unexpected-read` path не оставлять slave “без байта” и явно задать policy выбора реакции:
    - порядок по умолчанию: `NACK/abort` → `dummy TX` → `controlled reset`;
-   - `dummy TX` (предопределённый fail-safe байт, например `0xFF`) — если нужно быстро завершить текущий read без reset;
-   - аварийный `NACK/abort` — при недопустимом состоянии FSM до начала выдачи полезных данных;
-   - `controlled reset` I2C1 state machine (через `I2C_CR1_SWRST` либо RCC peripheral reset) в отложенном контексте — если состояние не нормализуется после abort/dummy path.
+   - аварийный `NACK/abort` — применять первым при недопустимом состоянии FSM до начала выдачи полезных данных;
+   - `dummy TX` (предопределённый fail-safe байт, например `0xFF`) — применять, если транзакцию нужно быстро и детерминированно завершить без немедленного reset;
+   - `controlled reset` I2C1 state machine (через `I2C_CR1_SWRST` либо RCC peripheral reset) в отложенном контексте — применять, если состояние не нормализуется после abort/dummy path или повторяется в пределах контрольного окна.
    После любой из веток обязателен гарантированный re-init/listen re-arm.
    Тяжёлый reset-sequence не выполнять прямо внутри IRQ, кроме явно оговорённого last-resort сценария.
 4. Перед `NVIC_SystemReset()` сохранять код причины reset (и диагностический reason code) в `.noinit`.
