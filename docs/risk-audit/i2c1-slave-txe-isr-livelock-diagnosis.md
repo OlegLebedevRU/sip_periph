@@ -51,7 +51,7 @@ Repository: `OlegLebedevRU/sip_periph`
 | `bak/STM32F411.txt` | Снимок системных регистров Cortex-M/NVIC/SysTick и периферии | Доказать активный IRQ, pending системных исключений и отсутствие fault |
 | `bak/0xE000E000.bin` | Dump системного блока (`0xE000E000`, 3584 байта) | Побайтовая проверка состояния core/system control |
 | `bak/I2C1.bin` | Dump I2C1 (`0x40005400`, 64 байта) | Подтвердить TXE/BUSY/TRA и режим slave-transmitter |
-| `bak/GPIOB.bin` | Dump GPIOB (`0x40020400`, 48 байт) | Подтвердить физические уровни SCL/SDA |
+| `bak/GPIOB.bin` | Dump GPIOB (`0x40020400`, 48 байта) | Подтвердить физические уровни SCL/SDA |
 | `bak/MSP.bin` | Снимок MSP/stack контекста | Дополнительная forensic-проверка контекста исполнения |
 
 ---
@@ -161,8 +161,8 @@ PR #21 добавил полезные task-level watchdog/recovery слои, н
 ## Следующие инженерные меры (рекомендации для будущего PR, не реализация в этом документе)
 
 1. Включить аппаратный `IWDG`; кормление делать только из task/supervisor context (не из ISR).
-2. Добавить ISR-level guard в `I2C1_EV_IRQHandler` на патологическое состояние `TXE + TRA + BUSY` с ограничением времени/итераций.
-3. В `unexpected-read` path не оставлять slave “без байта”: предусмотреть `dummy TX` / аварийный `NACK` / immediate reset I2C1 state machine (например, через `I2C_CR1_SWRST` либо через RCC peripheral reset, с последующим гарантированным re-init/listen re-arm).
+2. Добавить ISR-level guard в `I2C1_EV_IRQHandler` на патологическое состояние `TXE + TRA + BUSY`: guard должен быть lightweight (фиксировать anomaly/recovery-flag), а восстановление выполнять в отложенном supervisor/task context; дополнительно добавить pre-condition проверки перед включением `ITBUFEN`.
+3. В `unexpected-read` path не оставлять slave “без байта”: предусмотреть `dummy TX` / аварийный `NACK` / controlled reset I2C1 state machine (через `I2C_CR1_SWRST` либо RCC peripheral reset) в отложенном контексте с последующим гарантированным re-init/listen re-arm; не выполнять тяжёлый reset-sequence прямо внутри IRQ, кроме явно оговорённого last-resort сценария.
 4. Перед `NVIC_SystemReset()` сохранять код причины reset (и диагностический reason code) в `.noinit`.
 5. Сохранить task-level watchdog-и как вторичный слой защиты, явно учитывая, что при ISR lock они не исполняются.
 6. Пересмотреть использование `osPriorityRealtime` для I2C-задач (профилактика task-level starvation), но считать это вторичным фактором, не первопричиной данного ISR-зависания.
