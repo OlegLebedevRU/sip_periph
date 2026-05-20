@@ -164,9 +164,11 @@ PR #21 добавил полезные task-level watchdog/recovery слои, н
 2. Добавить ISR-level guard в `I2C1_EV_IRQHandler` на патологическое состояние `TXE + TRA + BUSY`:
    - guard должен быть lightweight и не выполнять тяжёлое восстановление внутри IRQ;
    - сигнал в отложенный контекст передавать через `xTaskNotifyFromISR` (supervisor task) или recovery queue event;
+   - при использовании notify-path учитывать `portYIELD_FROM_ISR` для минимизации задержки обработки;
    - само восстановление выполнять вне IRQ;
    - дополнительно добавить pre-condition проверки перед включением `ITBUFEN`.
 3. В `unexpected-read` path не оставлять slave “без байта” и явно задать policy выбора реакции:
+   - порядок по умолчанию: `NACK/abort` → `dummy TX` → `controlled reset`;
    - `dummy TX` (предопределённый fail-safe байт, например `0xFF`) — если нужно быстро завершить текущий read без reset;
    - аварийный `NACK/abort` — при недопустимом состоянии FSM до начала выдачи полезных данных;
    - `controlled reset` I2C1 state machine (через `I2C_CR1_SWRST` либо RCC peripheral reset) в отложенном контексте — если состояние не нормализуется после abort/dummy path.
