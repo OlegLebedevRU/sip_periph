@@ -161,12 +161,17 @@ PR #21 добавил полезные task-level watchdog/recovery слои, н
 ## Следующие инженерные меры (рекомендации для будущего PR, не реализация в этом документе)
 
 1. Включить аппаратный `IWDG`; выполнять `IWDG refresh` только из task/supervisor context (не из ISR).
-2. Добавить ISR-level guard в `I2C1_EV_IRQHandler` на патологическое состояние `TXE + TRA + BUSY`: guard должен быть lightweight и только сигнализировать в отложенный контекст (например, `xTaskNotifyFromISR` в supervisor task или отдельный recovery queue event), а само восстановление выполнять вне IRQ; дополнительно добавить pre-condition проверки перед включением `ITBUFEN`.
+2. Добавить ISR-level guard в `I2C1_EV_IRQHandler` на патологическое состояние `TXE + TRA + BUSY`:
+   - guard должен быть lightweight и не выполнять тяжёлое восстановление внутри IRQ;
+   - сигнал в отложенный контекст передавать через `xTaskNotifyFromISR` (supervisor task) или recovery queue event;
+   - само восстановление выполнять вне IRQ;
+   - дополнительно добавить pre-condition проверки перед включением `ITBUFEN`.
 3. В `unexpected-read` path не оставлять slave “без байта” и явно задать policy выбора реакции:
    - `dummy TX` (предопределённый fail-safe байт, например `0xFF`) — если нужно быстро завершить текущий read без reset;
    - аварийный `NACK/abort` — при недопустимом состоянии FSM до начала выдачи полезных данных;
    - `controlled reset` I2C1 state machine (через `I2C_CR1_SWRST` либо RCC peripheral reset) в отложенном контексте — если состояние не нормализуется после abort/dummy path.
-   После любой из веток обязателен гарантированный re-init/listen re-arm; не выполнять тяжёлый reset-sequence прямо внутри IRQ, кроме явно оговорённого last-resort сценария.
+   После любой из веток обязателен гарантированный re-init/listen re-arm.
+   Тяжёлый reset-sequence не выполнять прямо внутри IRQ, кроме явно оговорённого last-resort сценария.
 4. Перед `NVIC_SystemReset()` сохранять код причины reset (и диагностический reason code) в `.noinit`.
 5. Сохранить task-level watchdog-и как вторичный слой защиты, явно учитывая, что при ISR lock они не исполняются.
 6. Пересмотреть использование `osPriorityRealtime` для I2C-задач (профилактика task-level starvation), но считать это вторичным фактором, не первопричиной данного ISR-зависания.
