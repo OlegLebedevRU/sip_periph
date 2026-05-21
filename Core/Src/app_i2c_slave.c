@@ -72,14 +72,15 @@ extern osTimerId myTimerBuzzerOffHandle;
 #define I2C1_ISR_STARVATION_ENTRIES_LIMIT 4096U
 #define I2C1_UNEXPECTED_READ_RESET_LIMIT 16U
 /* Beyond this many consecutive unexpected reads, stop serving dummy bytes and
- * escalate to a controlled I2C1 peripheral reset via schedule_recovery().
+ * escalate to a controlled I2C1 peripheral reset.
  *
  * History: 64 (original) → 8 (PR#24, too aggressive — turned normal protocol
  * re-syncs into HdRcv++ storms and broke master→write because every retry
  * after hard_recover_bus() immediately re-escalated) → 32 (current). 32 is
  * comfortably above the 16-entry soft RESET_LIMIT and well below anything
- * that could starve PendSV given the tier-1 fast-NACK path already kills TXE
- * synchronously on each unexpected read. */
+ * that could starve PendSV. The fast-NACK path must also escalate at this
+ * limit because an ADDR retry storm can keep hitting that path and never reach
+ * the heavier dummy-TX branch. */
 #define I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT 32U
 #define DWIN_STATUS_VP_ADDR              0x5200U
 
@@ -488,14 +489,20 @@ static uint8_t unexpected_read_fast_nack(I2C_HandleTypeDef *hi2c)
     if (s_i2c1_unexpected_read_consecutive < 0xFFU) {
         s_i2c1_unexpected_read_consecutive++;
     }
-    /* NOTE: Escalation to a controlled peripheral reset is intentionally NOT
-     * performed here. The fast-NACK path already synchronously clears TXE +
-     * ACK + ITBUFEN before the ISR exits, so it cannot itself starve PendSV.
-     * Escalation lives in the heavier `unexpected_read_dummy_or_reset()`
-     * branch (gated by `I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT`), which
-     * is the only place where a true protocol-level desync is observable —
-     * fast-path escalation in PR#24 caused HdRcv (`hard_recover_count`) to
-     * grow on legitimate repeated-start retries and broke master→write. */
+    /* If the master keeps issuing unexpected reads, the fast-NACK path can be
+     * hit repeatedly and the heavier dummy-TX reset branch is never reached.
+     * Escalate from here too, but only at the relaxed post-PR#25 limit and
+     * with hard_recover_bus() clearing this counter afterwards, so a transient
+     * re-sync burst does not become the PR#24 permanent HdRcv storm. */
+    if (s_i2c1_unexpected_read_consecutive >= I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT) {
+        uint32_t sr1_s = I2C1->SR1;
+        uint32_t sr2_s = ((sr1_s & I2C_SR1_ADDR) == 0U) ? I2C1->SR2 : 0U;
+        uint32_t cr2_s = I2C1->CR2;
+        s_i2c1_unexpected_read_consecutive = I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT;
+        emergency_system_reset_from_isr(I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_RESET,
+                                        sr1_s, sr2_s, cr2_s);
+        return 1U;
+    }
     note_progress(I2C_SLAVE_PAYLOAD_TIMEOUT_MS);
     return 1U;
 }
