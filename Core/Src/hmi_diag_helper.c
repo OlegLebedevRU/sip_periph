@@ -17,12 +17,9 @@ uint32_t hmi_diag_error_sum(void)
 {
     const app_i2c_slave_diag_t *d = app_i2c_slave_get_diag();
     return d->progress_timeout_count + d->stuck_scl_count
-         + d->stuck_sda_count + d->outbox_timeout_count
-         + d->event_low_timeout_count + d->queue_stall_count
-         + d->dwin_stall_count + d->touch_stall_count
-         + d->abort_count + d->hard_recover_count
-         + d->full_reinit_count + d->system_reset_count
-         + d->malformed_count + d->recover_fail_count;
+         + d->stuck_sda_count + d->abort_count
+         + d->hard_recover_count + d->malformed_count
+         + d->recover_fail_count;
 }
 
 /* ---- HH:MM:SS extraction ------------------------------------------------ */
