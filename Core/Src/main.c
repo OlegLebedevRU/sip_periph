@@ -53,6 +53,23 @@
 #define rtos_require_alloc(handle_) configASSERT((handle_) != NULL)
 #endif
 
+#ifndef APP_IWDG_ENABLE
+#define APP_IWDG_ENABLE 0
+#endif
+
+#ifndef APP_BRINGUP_NO_RESET
+#define APP_BRINGUP_NO_RESET 1
+#endif
+
+#define APP_IWDG_KR_ENABLE_ACCESS 0x5555U
+#define APP_IWDG_KR_RELOAD        0xAAAAU
+#define APP_IWDG_KR_START         0xCCCCU
+#define APP_IWDG_PRESCALER_DIV32  3U
+#define APP_IWDG_RELOAD_2S        1999U
+#define APP_IWDG_REFRESH_MS       250U
+#define APP_IWDG_I2C_GUARD_STALE_MS 750U
+#define APP_IWDG_REGISTER_WAIT_LIMIT 100000U
+
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -96,6 +113,9 @@ osTimerId myTimerBuzzerOffHandle;
 osMutexId i2c2_MutexHandle;
 osSemaphoreId pn532SemaphoreHandle;
 /* USER CODE BEGIN PV */
+#if APP_IWDG_ENABLE
+static osThreadId myTaskWatchdogHandle;
+#endif
 /* USER CODE END PV */
 
 /* USER CODE BEGIN TCA6408A_HELPERS */
@@ -134,6 +154,10 @@ extern void cb_TmReleAct(void const * argument);
 extern void cb_Tm_buzzerOff(void const * argument);
 
 /* USER CODE BEGIN PFP */
+#if APP_IWDG_ENABLE
+static void APP_IWDG_Init(void);
+static void StartTaskWatchdog(void const * argument);
+#endif
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -251,6 +275,9 @@ int main(void)
 	 * PIN_EVENT_TO_ESP.  Running it here (bare-metal, pre-scheduler)
 	 * avoids both races entirely. */
 	app_i2c_slave_init();
+#if APP_IWDG_ENABLE
+  APP_IWDG_Init();
+#endif
   /* USER CODE END 2 */
 
   /* Create the mutex(es) */
@@ -419,7 +446,7 @@ int main(void)
   rtos_require_alloc(myTask_tca6408aHandle);
 
   /* definition and creation of myTaskI2cGuard — dedicated I2C1 bus health monitor */
-  osThreadDef(myTaskI2cGuard, StartTaskI2cGuard, osPriorityRealtime, 0, 256);
+  osThreadDef(myTaskI2cGuard, StartTaskI2cGuard, osPriorityNormal, 0, 256);
   myTaskI2cGuardHandle = osThreadCreate(osThread(myTaskI2cGuard), NULL);
   rtos_require_alloc(myTaskI2cGuardHandle);
 
@@ -430,6 +457,11 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_THREADS */
 	/* add threads, ... */
+#if APP_IWDG_ENABLE
+  osThreadDef(myTaskWatchdog, StartTaskWatchdog, osPriorityRealtime, 0, 128);
+  myTaskWatchdogHandle = osThreadCreate(osThread(myTaskWatchdog), NULL);
+  rtos_require_alloc(myTaskWatchdogHandle);
+#endif
   /* USER CODE END RTOS_THREADS */
 
   /* Start scheduler */
@@ -865,6 +897,48 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+#if APP_IWDG_ENABLE
+static void APP_IWDG_Init(void)
+{
+  uint32_t wait;
+
+  IWDG->KR = APP_IWDG_KR_ENABLE_ACCESS;
+  IWDG->PR = APP_IWDG_PRESCALER_DIV32;
+  IWDG->RLR = APP_IWDG_RELOAD_2S;
+
+  wait = APP_IWDG_REGISTER_WAIT_LIMIT;
+  while (((IWDG->SR & (IWDG_SR_PVU | IWDG_SR_RVU)) != 0U) && (wait-- > 0U)) {
+    __NOP();
+  }
+
+  IWDG->KR = APP_IWDG_KR_RELOAD;
+  IWDG->KR = APP_IWDG_KR_START;
+}
+
+static void StartTaskWatchdog(void const * argument)
+{
+  uint32_t last_tick;
+  (void)argument;
+
+  last_tick = HAL_GetTick();
+  for (;;) {
+    uint32_t now;
+
+    osDelay(APP_IWDG_REFRESH_MS);
+    now = HAL_GetTick();
+    if ((now == last_tick)
+        || (app_i2c_slave_watchdog_can_refresh(APP_IWDG_I2C_GUARD_STALE_MS) == 0U)) {
+      app_i2c_slave_note_iwdg_supervisor_timeout();
+      for (;;) {
+        osDelay(1000U);
+      }
+    }
+
+    IWDG->KR = APP_IWDG_KR_RELOAD;
+    last_tick = now;
+  }
+}
+#endif
 
 /* USER CODE END 4 */
 
@@ -978,7 +1052,9 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
 	/* User can add his own implementation to report the HAL error return state */
 	__disable_irq();
+#if !APP_BRINGUP_NO_RESET
 	NVIC_SystemReset();
+#endif
 	while (1) {
 	}
   /* USER CODE END Error_Handler_Debug */

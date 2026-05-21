@@ -60,6 +60,10 @@ uint8_t hmi_autodelete_sec = HMI_AUTODELETE_SEC_DEFAULT;
 #define HMI_AUTH_PAGE_RETURN_MS 5000U  /* 5 seconds on auth page before return */
 #define HMI_DIAG_LINE_COUNT_EXT (app_i2c_slave_diag_line_count() + 1U)  /* +1 for time line */
 
+#ifndef HMI_AUTO_DIAG_ON_ERROR
+#define HMI_AUTO_DIAG_ON_ERROR 0U
+#endif
+
 /* ---- Magic code detection state ---- */
 #define MAGIC_SEQ_LEN     3U
 static const uint8_t s_magic_seq[MAGIC_SEQ_LEN] = { '1', '0', '1' };  /* then '*' triggers */
@@ -68,6 +72,8 @@ static uint8_t s_magic_pos = 0U;          /* how many of s_magic_seq matched so 
 static uint8_t s_magic2_pos = 0U;         /* how many of s_magic2_seq matched so far */
 static volatile uint8_t s_diag_oneshot = 0U;   /* 1 = one full diag rotation requested */
 static uint8_t s_diag_oneshot_remaining = 0U;  /* lines left in current oneshot cycle */
+static MsgHmi_t s_pending_hmi_msg = {0};
+static volatile uint8_t s_pending_hmi_msg_valid = 0U;
 
 /* ---- Diag cancel: set by StartTaskHmi on '*' in idle, read by StartTaskHmiMsg ---- */
 static volatile uint8_t s_diag_cancel = 0U;
@@ -178,6 +184,18 @@ static uint32_t hmi_wait_for_input_packet(MsgUart_t *uart_msg)
 static uint32_t hmi_wait_for_host_message(void)
 {
 	return (uint32_t)xQueueReceive(myQueueHmiMsgHandle, &msg_hmi, HMI_MSG_IDLE_WAIT_MS);
+}
+
+static void hmi_display_host_message(const MsgHmi_t *msg)
+{
+	if (msg == NULL) {
+		return;
+	}
+	msg_hmi = *msg;
+	osTimerStart(myTimerHmiTtlHandle, (uint32_t)msg_hmi.msg_ttl * 1000U);
+	if (msg_hmi.psize > 0U && msg_hmi.psize <= HMI_MAX_MSG_PSIZE) {
+		dwin_input_output(&msg_hmi.msg_buf[0], msg_hmi.psize);
+	}
 }
 
 //----------------------
@@ -427,6 +445,10 @@ void StartTaskHmiMsg(void const *argument) {
 				s_auth_page_return_tick = 0U;
 				s_auth_result_display_active = 0U;
 				dwin_gfx_page_switch(0);
+				if (s_pending_hmi_msg_valid != 0U) {
+					s_pending_hmi_msg_valid = 0U;
+					hmi_display_host_message(&s_pending_hmi_msg);
+				}
 			}
 		}
 
@@ -441,13 +463,12 @@ void StartTaskHmiMsg(void const *argument) {
 
 		if (event == pdPASS) {
 			if (s_auth_result_display_active != 0U) {
+				s_pending_hmi_msg = msg_hmi;
+				s_pending_hmi_msg_valid = 1U;
 				continue;
 			}
 			/* Got a real message from queue — display it */
-			osTimerStart(myTimerHmiTtlHandle, (uint32_t)msg_hmi.msg_ttl * 1000U);
-			if (msg_hmi.psize > 0U && msg_hmi.psize <= HMI_MAX_MSG_PSIZE) {
-				dwin_input_output(&msg_hmi.msg_buf[0], msg_hmi.psize);
-			}
+			hmi_display_host_message(&msg_hmi);
 		} else {
 			uint32_t now = HAL_GetTick();
 
@@ -480,9 +501,13 @@ void StartTaskHmiMsg(void const *argument) {
 			 *   - oneshot was triggered by magic 101* */
 			uint32_t err_sum = hmi_diag_error_sum();
 			uint8_t want_diag = 0U;
+#if HMI_AUTO_DIAG_ON_ERROR
 			if (err_sum != diag_err_snapshot) {
 				want_diag = 1U;
 			}
+#else
+			diag_err_snapshot = err_sum;
+#endif
 			if (s_diag_oneshot != 0U && s_diag_oneshot_remaining > 0U) {
 				want_diag = 1U;
 			}

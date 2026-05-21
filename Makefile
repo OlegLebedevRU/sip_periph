@@ -42,7 +42,6 @@ C_INCLUDES = \
   -IDrivers/CMSIS/Include \
   -IMiddlewares/Third_Party/FreeRTOS/Source/include \
   -IMiddlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS \
-  -IMiddlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2 \
   -IMiddlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F \
   -IMiddlewares/ST/STM32_USB_Device_Library/Core/Inc \
   -IMiddlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc \

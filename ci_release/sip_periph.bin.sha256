@@ -1,1 +1,5 @@
 8b4232e38b7d6758bd4ea9375be6f33caeab9c627b1875d5a2d58d167d224895
+https://storage.yandexcloud.net/esp32bin/sip_periph.bin
+
+W (13150184) STM32_bus: reject GM810 packet: len=12 flags=0x04 chunk=0/1 protocol=0
+W (13242663) STM32_bus: reject GM810 packet: len=12 flags=0x0C chunk=0/1 protocol=0

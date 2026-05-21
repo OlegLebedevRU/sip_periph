@@ -14,6 +14,10 @@
 #include "leo4_nvs.h"
 #include "l4_cfg_repo.h"
 #include "l4_sip_control.h"
+#include "l4_stm32_bus.h"
+#include "l4_input_processing_test_hooks.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,23 +29,39 @@ static char map_data[16] = {0};
 
 #define INPUT_HMI_TEXT_LEN 10
 #define INPUT_RESULT_HEADER_LEN 3
+#define FRONTEND_INPUT_QUEUE_LEN 16
+#define FRONTEND_INPUT_MAX_LEN 16
+#define FRONTEND_INPUT_WORKER_STACK 6144
+#define FRONTEND_INPUT_WORKER_PRIO 8
+
+typedef struct {
+	FrontendSource_t source;
+	FrontendSourceInputLenght_t length;
+	uint8_t data[FRONTEND_INPUT_MAX_LEN];
+} FrontendQueuedInput_t;
+
+static QueueHandle_t s_frontend_input_queue = NULL;
+static bool s_frontend_worker_started = false;
+
+static void frontend_input_worker_task(void *arg);
+static void frontend_process_input(const FrontendSource_t source,
+					const FrontendSourceInputLenght_t length,
+					const uint8_t *data,
+					InputAuthResult_t *input_dispatch_result);
 
 /*
  * frontend_list.nvs_key - cast reflections from enum FrontendSource_t
  * */
-static struct FrontendSettings_s settings_default_card = {
-	.auth_ns = "auth_free",
-	.flags = 124,
-	.script = "free_pass"
-};
 static FrontendCfg_t frontend_list[] = {
 	{WIEGAND_READER, "wiegand", NULL},
 	{WIEGAND_PIN_READER, "wiegand_pin", NULL},
 	{I2C_USER_ID_READER, "i2c_reader", NULL},
 	{TOUCH_KEYPAD, "touch_keypad", NULL},
 	{API_CODE_INPUT_READER, "api_code_input", NULL},
-	{PN532_READER, "pn532", &settings_default_card},
+	{PN532_READER, "pn532", NULL},
 	{MATRIX_KEYBOARD, "matrix_key", NULL},
+	{DTMF_ID, "dtmf_id", NULL},
+	{GM810_READER, "gm810", NULL}
 };
 
 static size_t frontend_list_count(void) {
@@ -49,7 +69,10 @@ static size_t frontend_list_count(void) {
 }
 
 static bool frontend_source_is_text_input(const FrontendSource_t source) {
-	return (source == TOUCH_KEYPAD) || (source == API_CODE_INPUT_READER);
+	return (source == TOUCH_KEYPAD)
+			|| (source == API_CODE_INPUT_READER)
+			|| (source == DTMF_ID)
+			|| (source == GM810_READER);
 }
 
 static bool frontend_flag_enabled(const struct FrontendSettings_s *settings,
@@ -104,6 +127,11 @@ static void fill_open_cell_result(InputAuthResult_t *result,
 	result->result = AUTH_RESULT_SUCCESS;
 	result->res_register_1 = cell_params;
 	set_result_display(result, "CELL -----");
+}
+
+static void fill_no_auth_result(InputAuthResult_t *result) {
+	reset_input_result(result);
+	set_result_display(result, "NO AUTH");
 }
 
 static void clear_current_input(void) {
@@ -278,6 +306,18 @@ static void execute_user_script(const struct FrontendSettings_s *settings,
 	if (strcmp(settings->script, "free_pass") == 0) {
 		input_context->user_id_is_valid = true;
 		fill_open_door_result(result);
+		if ((settings->auth_ns[0] != '\0') && (input_value[0] != '\0')) {
+			esp_err_t write_ret = set_nvs_record_str(L4_NVS_PART_DB,
+											 settings->auth_ns,
+											 input_value,
+											 input_value);
+			if (write_ret != ESP_OK) {
+				ESP_LOGW(TAG, "free_pass cache write failed ns=%s key=%s err=%s",
+						 settings->auth_ns,
+						 input_value,
+						 esp_err_to_name(write_ret));
+			}
+		}
 		return;
 	}
 	if (strcmp(settings->script, "open_door") == 0) {
@@ -308,28 +348,125 @@ static void execute_user_script(const struct FrontendSettings_s *settings,
 	}
 	if (strcmp(settings->script, "sip_map") == 0) {
 		if (auth_value[0] == '\0') {
-			input_context->user_id_is_valid_unbinded = true;
+			fill_no_auth_result(result);
 			return;
 		}
 		input_context->user_id_is_valid = true;
 		if (!audio_session) {
 			leo4_call(auth_value);
-			set_result_display(result, "CALLING...");
+			/* HMI display is now driven by SIP call state on every TIME tick */
 		}
 		return;
 	}
-	input_context->user_id_is_valid = true;
+	if (strcmp(settings->script, "no_auth") == 0) {
+		fill_no_auth_result(result);
+		return;
+	}
+
+	ESP_LOGW(TAG, "Unknown script '%s' -> no_auth", settings->script);
+	fill_no_auth_result(result);
 }
 
 void frontend_processing_init() {
 	current_input.mutex = xSemaphoreCreateMutex();
 	clear_current_input();
 	get_nvs_cfg_frontend(frontend_list, frontend_list_count());
+
+	if (s_frontend_input_queue == NULL) {
+		s_frontend_input_queue = xQueueCreate(FRONTEND_INPUT_QUEUE_LEN,
+									 sizeof(FrontendQueuedInput_t));
+		if (s_frontend_input_queue == NULL) {
+			ESP_LOGE(TAG, "Failed to create frontend input queue");
+			return;
+		}
+	}
+	if (!s_frontend_worker_started) {
+		BaseType_t task_ok = xTaskCreate(frontend_input_worker_task,
+										 "frontend_input_worker",
+										 FRONTEND_INPUT_WORKER_STACK,
+										 NULL,
+										 FRONTEND_INPUT_WORKER_PRIO,
+										 NULL);
+		if (task_ok != pdPASS) {
+			ESP_LOGE(TAG, "Failed to create frontend input worker task");
+			return;
+		}
+		s_frontend_worker_started = true;
+	}
 }
 
-void input_dispatch(const FrontendSource_t source,
+#if CONFIG_L4_ENABLE_DTMF_SMOKE_TEST
+static uint32_t s_dtmf_postprocess_calls = 0;
+static InputAuthResult_t s_last_dtmf_result = {0};
+#endif
+
+static void postprocess_dtmf_result(const InputAuthResult_t *result) {
+	if (result != NULL) {
+#if CONFIG_L4_ENABLE_DTMF_SMOKE_TEST
+		s_dtmf_postprocess_calls++;
+		s_last_dtmf_result = *result;
+#endif
+		if ((result->msg[0] > 0) && (result->msg[0] < 17)) {
+			if (stm32_act_result_write_bus(*result) != ESP_OK) {
+				ESP_LOGW(TAG, "DTMF postprocess: failed to write result to STM32 bus");
+			}
+		}
+	}
+	leo4_hangup();
+}
+
+static void postprocess_frontend_result(const FrontendSource_t source,
+						const InputAuthResult_t *result) {
+	if (result == NULL) {
+		return;
+	}
+
+	if (source == DTMF_ID) {
+		postprocess_dtmf_result(result);
+		return;
+	}
+
+	if ((source == PN532_READER) || (source == MATRIX_KEYBOARD)
+			|| (source == GM810_READER)
+			|| (source == WIEGAND_PIN_READER)) {
+		if (stm32_act_result_write_bus(*result) != ESP_OK) {
+			ESP_LOGW(TAG, "postprocess: failed to write result to STM32 bus");
+		}
+		return;
+	}
+
+	if (source == TOUCH_KEYPAD) {
+		if ((result->msg[0] > 0) && (result->msg[0] < 17)) {
+			if (stm32_act_result_write_bus(*result) != ESP_OK) {
+				ESP_LOGW(TAG, "postprocess: failed to write HMI result to STM32 bus");
+			}
+		}
+	}
+}
+
+#if CONFIG_L4_ENABLE_DTMF_SMOKE_TEST
+void l4_input_processing_reset_dtmf_smoke_counters(void) {
+	s_dtmf_postprocess_calls = 0;
+	memset(&s_last_dtmf_result, 0, sizeof(s_last_dtmf_result));
+}
+
+uint32_t l4_input_processing_get_dtmf_postprocess_calls(void) {
+	return s_dtmf_postprocess_calls;
+}
+
+bool l4_input_processing_get_last_dtmf_result(InputAuthResult_t *out_result) {
+	if (out_result == NULL) {
+		return false;
+	}
+	*out_result = s_last_dtmf_result;
+	return true;
+}
+#endif
+
+static void frontend_process_input(const FrontendSource_t source,
 					const FrontendSourceInputLenght_t length,
-					const uint8_t *data, InputAuthResult_t *input_dispatch_result) {
+					const uint8_t *data,
+					InputAuthResult_t *input_dispatch_result) {
 	struct FrontendSettings_s settings = {0};
 	MsgEvent_t event_input = {0};
 	char admin_script[16] = {0};
@@ -339,22 +476,22 @@ void input_dispatch(const FrontendSource_t source,
 	InputContext_t *input_context = NULL;
 
 	if (input_dispatch_result == NULL) {
-		ESP_LOGW(TAG, "input_dispatch: input_dispatch_result is NULL");
+		ESP_LOGW(TAG, "frontend_process_input: input_dispatch_result is NULL");
 		return;
 	}
 	reset_input_result(input_dispatch_result);
 
 	if ((data == NULL) && (length > 0)) {
-		ESP_LOGW(TAG, "input_dispatch: data is NULL, length=%u", (unsigned) length);
+		ESP_LOGW(TAG, "frontend_process_input: data is NULL, length=%u", (unsigned) length);
 		return;
 	}
 	if (current_input.mutex == NULL) {
-		ESP_LOGW(TAG, "input_dispatch: mutex is not initialized");
+		ESP_LOGW(TAG, "frontend_process_input: mutex is not initialized");
 		return;
 	}
 
 	if (xSemaphoreTake(current_input.mutex, 0) != pdTRUE) {
-		ESP_LOGW(TAG, "input_dispatch: busy, ignore new input source=%d", source);
+		ESP_LOGW(TAG, "frontend_process_input: busy, ignore new input source=%d", source);
 		fill_busy_result(input_dispatch_result);
 		return;
 	}
@@ -409,13 +546,34 @@ void input_dispatch(const FrontendSource_t source,
 		execute_user_script(&settings, current_input.input, ptr_data,
 					   input_dispatch_result, input_context);
 	} else {
-		if (!audio_session) {
-			audio_player_int_tone_play(tone_uri[TONE_TYPE_WIFI_SUCCESS]);
+		if (settings.fallback[0] != '\0') {
+			struct FrontendSettings_s fallback_settings = settings;
+			snprintf(fallback_settings.script,
+					 sizeof(fallback_settings.script),
+					 "%s",
+					 settings.fallback);
+			execute_user_script(&fallback_settings,
+							current_input.input,
+							current_input.input,
+							input_dispatch_result,
+							input_context);
+		} else {
+			struct FrontendSettings_s no_auth_settings = settings;
+			snprintf(no_auth_settings.script,
+					 sizeof(no_auth_settings.script),
+					 "%s",
+					 "no_auth");
+			execute_user_script(&no_auth_settings,
+							current_input.input,
+							current_input.input,
+							input_dispatch_result,
+							input_context);
 		}
 	}
 
 finalize:
 	send_event_router(&event_input, settings);
+	postprocess_frontend_result(source, input_dispatch_result);
 	clear_current_input();
 	if (locked) {
 		xSemaphoreGive(current_input.mutex);
@@ -424,4 +582,57 @@ finalize:
 		TAG,
 		"***************  END input "
 		"processing--------------------------****************************");
+}
+
+static void frontend_input_worker_task(void *arg) {
+	(void)arg;
+	FrontendQueuedInput_t item = {0};
+	for (;;) {
+		if (xQueueReceive(s_frontend_input_queue, &item, portMAX_DELAY) == pdTRUE) {
+			InputAuthResult_t result = {0};
+			frontend_process_input(item.source, item.length, item.data, &result);
+		}
+	}
+}
+
+esp_err_t frontend_input_enqueue(const FrontendSource_t source,
+							 const FrontendSourceInputLenght_t length,
+							 const uint8_t *data) {
+	if ((length > 0) && (data == NULL)) {
+		return ESP_ERR_INVALID_ARG;
+	}
+	if ((size_t)length > FRONTEND_INPUT_MAX_LEN) {
+		ESP_LOGW(TAG, "frontend_input_enqueue: input too large source=%d len=%u", source, (unsigned)length);
+		return ESP_ERR_INVALID_SIZE;
+	}
+	if (s_frontend_input_queue == NULL) {
+		return ESP_ERR_INVALID_STATE;
+	}
+	if ((current_input.mutex != NULL)
+			&& (xSemaphoreTake(current_input.mutex, 0) != pdTRUE)) {
+		ESP_LOGW(TAG, "frontend_input_enqueue: busy session source=%d", source);
+		return ESP_ERR_TIMEOUT;
+	}
+	if (current_input.mutex != NULL) {
+		xSemaphoreGive(current_input.mutex);
+	}
+	if (uxQueueMessagesWaiting(s_frontend_input_queue) > 0) {
+		ESP_LOGW(TAG, "frontend_input_enqueue: pending input exists, drop source=%d", source);
+		return ESP_ERR_TIMEOUT;
+	}
+
+	FrontendQueuedInput_t item = {
+		.source = source,
+		.length = length,
+		.data = {0},
+	};
+	if ((length > 0) && (data != NULL)) {
+		memcpy(item.data, data, (size_t)length);
+	}
+
+	if (xQueueSend(s_frontend_input_queue, &item, 0) != pdTRUE) {
+		ESP_LOGW(TAG, "frontend_input_enqueue: queue full source=%d", source);
+		return ESP_ERR_TIMEOUT;
+	}
+	return ESP_OK;
 }
