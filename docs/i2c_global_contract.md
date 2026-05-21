@@ -168,15 +168,9 @@ All master writes use the exact frame `[reg,len,payload...]`.
 | `0x50` | fixed allowed profile(s) per master revision | payload bytes after header are still carried under strict master-fixed `len`; no headerless/implicit-length write is allowed | deliver HMI message frame |
 | `0x30` | `2` | service bytes currently observed as `[0x00, 0x03]` in normal cycle | refresh/apply runtime-related service state |
 | `0x88` | `7` | RTC sync payload | validate and apply time sync |
-| `0xE0` | `16` | config bytes `E0..EF`; `E0.bit7=1` opts in to `PACKET_QR_GM810` publishing | refresh runtime config block |
+| `0xE0` | `16` | config bytes `E0..EF` | refresh runtime config block |
 
-### 7.1 Backward-compatible GM810 opt-in
-
-STM32 must not publish `PACKET_QR_GM810` unless the master explicitly sets `E0.bit7` in the runtime config block.
-
-This keeps legacy ESP32 firmware stable: masters that do not know packet type `0x0A` keep receiving only the pre-GM810 packet catalog.
-
-### 7.2 `0x50` clarification
+### 7.1 `0x50` clarification
 
 Even when message content originates from a logical variable-size application object, the I2C transaction itself is still defined by the strict master header `[reg,len]`.
 

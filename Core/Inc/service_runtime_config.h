@@ -33,7 +33,6 @@ typedef struct {
     uint8_t relay_pulse_en;      /* E0.bit0: 1 = разрешить реле от внешней кнопки */
     uint8_t auth_timeout_act;    /* E0.bit1: зарезервировано */
     uint8_t auth_fail_act;       /* E0.bit2: зарезервировано */
-    uint8_t gm810_qr_publish_en; /* E0.bit7: 1 = публиковать PACKET_QR_GM810 */
     uint8_t relay_act_sec;       /* E1[3:0]: время активации реле, секунды */
     uint8_t relay_before_100ms;  /* E1[7:4]: предзадержка реле × 100 ms */
     uint8_t matrix_freeze_sec;   /* E3[3:0]: заморозка matrix kbd после ввода '#' */

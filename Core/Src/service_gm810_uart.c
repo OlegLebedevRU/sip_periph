@@ -2,7 +2,6 @@
 #include "main.h"
 #include "cmsis_os.h"
 #include "service_gm810_uart.h"
-#include "service_runtime_config.h"
 #include "service_time_sync.h"
 
 extern UART_HandleTypeDef huart6;
@@ -486,16 +485,10 @@ static void gm810_note_published_packet(const uint8_t *packet)
 
 static void gm810_publish_completed_frame_from_isr(void)
 {
-    const runtime_config_t *cfg;
     uint8_t *window;
     uint8_t diag_len;
     I2cPacketToMaster_t pckt;
     BaseType_t prior = pdFALSE;
-
-    cfg = runtime_config_get();
-    if ((cfg == NULL) || (cfg->gm810_qr_publish_en == 0U)) {
-        return;
-    }
 
     if (s_rx.received_len == 0U) {
         return;

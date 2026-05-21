@@ -44,8 +44,6 @@ void runtime_config_init_defaults(uint8_t *ram)
     else
         ram[SVC_CFG_REG_E0] &= ~0x04U;
 
-    ram[SVC_CFG_REG_E0] &= (uint8_t)~REG_EX_GM810_QR_EN_BIT;
-
     /* E3[3:0] = matrix_freeze_sec */
     ram[SVC_CFG_REG_E3] = (ram[SVC_CFG_REG_E3] & 0xF0U)
                         | (0x0FU & MATRIX_KEYB_FREEZE_SEC_DEFAULT);
@@ -66,7 +64,6 @@ void runtime_config_apply_from_ram(const uint8_t *ram)
     s_cfg.relay_pulse_en      = (ram[SVC_CFG_REG_E0] & 0x01U) ? 1U : 0U;
     s_cfg.auth_timeout_act    = (ram[SVC_CFG_REG_E0] & 0x02U) ? 1U : 0U;
     s_cfg.auth_fail_act       = (ram[SVC_CFG_REG_E0] & 0x04U) ? 1U : 0U;
-    s_cfg.gm810_qr_publish_en = (ram[SVC_CFG_REG_E0] & REG_EX_GM810_QR_EN_BIT) ? 1U : 0U;
     s_cfg.relay_act_sec       = ram[SVC_CFG_REG_E1] & 0x0FU;
     s_cfg.relay_before_100ms  = (ram[SVC_CFG_REG_E1] >> 4U) & 0x0FU;
     s_cfg.matrix_freeze_sec   = ram[SVC_CFG_REG_E3] & 0x0FU;
