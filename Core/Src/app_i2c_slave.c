@@ -59,18 +59,28 @@ extern osTimerId myTimerBuzzerOffHandle;
  * HAL_GetTick() (driven by SysTick) does not advance. If SysTick is starved,
  * PendSV cannot run and the supervisor task can never recover — regardless of
  * which SR1/SR2 signature the peripheral is in (slave-receiver vs transmitter,
- * ADDR-NACK storm, AF storm, etc). Triggers within a fraction of a millisecond
- * before the bus has any chance to stay stuck. */
-#define I2C1_ISR_STARVATION_ENTRIES_LIMIT 128U
+ * ADDR-NACK storm, AF storm, etc).
+ *
+ * Threshold sizing: SysTick = 1 ms. At 400 kHz fast-mode an ESP32 master can
+ * legitimately produce ~50 bytes/ms × several IRQ entries per byte = several
+ * hundred entries within a single tick on bursty but healthy traffic. A real
+ * starvation lasts tens of ms (otherwise PendSV/watchdog timeouts do not
+ * trigger). 128 was tuned too tight after PR#24 and produced false positives
+ * that drove HdRcv (hard_recover_count) up on healthy traffic. 4096 keeps the
+ * guard armed for true multi-ms starvation while staying well clear of any
+ * legitimate burst. */
+#define I2C1_ISR_STARVATION_ENTRIES_LIMIT 4096U
 #define I2C1_UNEXPECTED_READ_RESET_LIMIT 16U
 /* Beyond this many consecutive unexpected reads, stop serving dummy bytes and
  * escalate to a controlled I2C1 peripheral reset via schedule_recovery().
- * Tightened from 64 → 8 after the post-PR#23 lock-up observed in
- * bak/STM32F411.txt: at 400 kHz fast-mode an ESP32 master can retry tens of
- * unexpected reads per ms, so the previous 64-entry budget allowed enough
- * back-to-back I2C1_EV_IRQHandler re-entries to starve PendSV before the
- * controlled reset could fire. */
-#define I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT 8U
+ *
+ * History: 64 (original) → 8 (PR#24, too aggressive — turned normal protocol
+ * re-syncs into HdRcv++ storms and broke master→write because every retry
+ * after hard_recover_bus() immediately re-escalated) → 32 (current). 32 is
+ * comfortably above the 16-entry soft RESET_LIMIT and well below anything
+ * that could starve PendSV given the tier-1 fast-NACK path already kills TXE
+ * synchronously on each unexpected read. */
+#define I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT 32U
 #define DWIN_STATUS_VP_ADDR              0x5200U
 
 /* ---- Deferred processing flags (ISR sets, task processes) -------------- */
@@ -478,21 +488,14 @@ static uint8_t unexpected_read_fast_nack(I2C_HandleTypeDef *hi2c)
     if (s_i2c1_unexpected_read_consecutive < 0xFFU) {
         s_i2c1_unexpected_read_consecutive++;
     }
-    /* If the master keeps issuing unexpected reads, the fast-NACK path alone
-     * is not enough — each retry triggers a fresh ADDR-match IRQ and PendSV
-     * can be starved before the heavier `unexpected_read_dummy_or_reset()`
-     * path is ever reached. Escalate to a controlled peripheral reset here
-     * once the consecutive-reads budget is exhausted: this masks the I2C1
-     * NVIC IRQs and lets the supervisor task run hard_recover_bus(). */
-    if (s_i2c1_unexpected_read_consecutive >= I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT) {
-        uint32_t sr1_s = I2C1->SR1;
-        uint32_t sr2_s = ((sr1_s & I2C_SR1_ADDR) == 0U) ? I2C1->SR2 : 0U;
-        uint32_t cr2_s = I2C1->CR2;
-        s_i2c1_unexpected_read_consecutive = I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT;
-        emergency_system_reset_from_isr(I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_RESET,
-                                        sr1_s, sr2_s, cr2_s);
-        return 1U;
-    }
+    /* NOTE: Escalation to a controlled peripheral reset is intentionally NOT
+     * performed here. The fast-NACK path already synchronously clears TXE +
+     * ACK + ITBUFEN before the ISR exits, so it cannot itself starve PendSV.
+     * Escalation lives in the heavier `unexpected_read_dummy_or_reset()`
+     * branch (gated by `I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT`), which
+     * is the only place where a true protocol-level desync is observable —
+     * fast-path escalation in PR#24 caused HdRcv (`hard_recover_count`) to
+     * grow on legitimate repeated-start retries and broke master→write. */
     note_progress(I2C_SLAVE_PAYLOAD_TIMEOUT_MS);
     return 1U;
 }
@@ -683,6 +686,12 @@ static void restart_listen_if_needed(void)
 {
     if (HAL_I2C_GetState(&hi2c1) != HAL_I2C_STATE_LISTEN) {
         reset_fsm_state();
+        /* Explicitly re-arm ACK on the I2C peripheral before re-entering
+         * listen mode. HAL_I2C_EnableListen_IT() also sets this bit, but
+         * `unexpected_read_fast_nack()` clears CR1.ACK directly without
+         * going through HAL; this dup is a cheap insurance that the next
+         * address match is ACKed even if some HAL path skipped the SET. */
+        SET_BIT(I2C1->CR1, I2C_CR1_ACK);
         if (HAL_I2C_EnableListen_IT(&hi2c1) == HAL_OK) {
             s_diag.relisten_count++;
             note_recovery_duration();
@@ -708,6 +717,17 @@ static void hard_recover_bus(void)
         return;
     }
     reset_fsm_state();
+    /* Clear all ISR-level guard counters so the first transaction after the
+     * peripheral reset gets a clean slate. Otherwise a stale saturated value
+     * (in particular `s_i2c1_unexpected_read_consecutive == LIMIT`) would
+     * immediately re-trigger the same escalation on the very next unexpected
+     * read and turn a one-off desync into a permanent HdRcv-storm that
+     * starves master→write traffic. */
+    s_i2c1_unexpected_read_consecutive = 0U;
+    s_i2c1_ev_irq_entries_since_tick = 0U;
+    s_i2c1_ev_irq_last_seen_tick = HAL_GetTick();
+    s_i2c1_ev_txe_tra_busy_spin_count = 0U;
+    SET_BIT(I2C1->CR1, I2C_CR1_ACK);
     if (HAL_I2C_EnableListen_IT(&hi2c1) == HAL_OK) {
         s_diag.relisten_count++;
         note_recovery_duration();
