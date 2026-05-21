@@ -29,10 +29,13 @@ It does **not** redefine:
 
 ESP32 flow is always:
 
+0. opt in by setting `E0.bit7=1` in the runtime config block
 1. receive STM32 event IRQ
 2. read `0x00` with `len=1`
 3. if returned `type == 0x0A`, read register `0x90` with `len=16`
 4. decode the fixed GM810 payload window
+
+STM32 suppresses this packet type by default so legacy ESP32 firmware that does not implement `0x0A -> 0x90/16` never sees the new type.
 
 ## 3. Fixed 16-byte payload window
 
@@ -115,6 +118,7 @@ If both bits are set:
 
 ESP32 implementation must:
 
+- explicitly enable GM810 publishing by writing `E0.bit7=1`
 - keep the existing project transport pattern: IRQ -> read `type` from `0x00` -> map to fixed `(reg,len)` -> read payload
 - add mapping `0x0A -> (reg=0x90, len=16)`
 - decode the fixed 16-byte payload exactly as specified above

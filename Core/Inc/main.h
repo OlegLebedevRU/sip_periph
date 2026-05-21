@@ -253,6 +253,7 @@ void hmi_show_auth_result(uint8_t auth_result);
 #define REG_EX_RELAY_PULSE_EN_BIT         (1U << 0) // 1: allow external button relay pulse
 #define REG_EX_AUTH_TIMEOUT_ACT_BIT       (1U << 1) // reserved/action flag
 #define REG_EX_AUTH_FAIL_ACT_BIT          (1U << 2) // reserved/action flag
+#define REG_EX_GM810_QR_EN_BIT            (1U << 7) // 1: allow PACKET_QR_GM810 publish
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
