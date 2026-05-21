@@ -1,15 +1,24 @@
-<<<<<<< HEAD
-# I2C1 slave TXE/TRA/BUSY ISR livelock diagnosis
+# STM32F411 I2C1 slave TXE/TRA/BUSY ISR livelock — diagnosis
 
+Repository: `sip_periph`
 Date: 2026-05-21
+Context: post-mortem diagnosis of a hang first captured after PR #21
+(`Harden I2C1 anti-hang path with multilayer watchdogs and staged STM32 recovery escalation`)
+and observed again on firmware matching the current repository state.
 
-## Summary
+---
 
-A production failure was captured where STM32F411 stayed permanently in `I2C1_EV_IRQn` while acting as an I2C1 slave transmitter for the ESP32 master. FreeRTOS tasks, SysTick handling, PendSV context switching, DWIN updates, PN532 processing, and I2C2 service work all stopped. The MCU core was still `RUNNING`, but the scheduler could not execute because the active exception never returned.
+## Summary (EN)
 
-## Evidence from hot-plug dump
+A production failure was captured where STM32F411 stayed permanently in `I2C1_EV_IRQn`
+while acting as an I2C1 slave transmitter for the ESP32 master. FreeRTOS tasks, SysTick
+handling, PendSV context switching, DWIN updates, PN532 processing, and I2C2 service
+work all stopped. The MCU core was still `RUNNING`, but the scheduler could not execute
+because the active exception never returned.
 
-### Active exception
+### Evidence from hot-plug dump
+
+**Active exception**
 
 `SCB->ICSR = 0x1400E82F`
 
@@ -19,7 +28,7 @@ A production failure was captured where STM32F411 stayed permanently in `I2C1_EV
 
 Repeated reads confirmed `ICSR & 0x1FF = 0x2F` was stable.
 
-### Not a CPU fault
+**Not a CPU fault**
 
 - `CFSR = 0x00000000`
 - `HFSR = 0x00000000`
@@ -27,16 +36,17 @@ Repeated reads confirmed `ICSR & 0x1FF = 0x2F` was stable.
 
 No HardFault/MemManage/BusFault/UsageFault was pending or active.
 
-### Scheduler could not run
+**Scheduler could not run**
 
 - `ICSR.PENDSTSET = 1`
 - `ICSR.PENDSVSET = 1`
 - `SysTick->CTRL = 0x00010007`
 - `SysTick ENABLE = 1`, `TICKINT = 1`, `COUNTFLAG = 1`
 
-SysTick and PendSV were pending, but never serviced because the core remained inside `I2C1_EV_IRQn`.
+SysTick and PendSV were pending, but never serviced because the core remained inside
+`I2C1_EV_IRQn`.
 
-### I2C1 peripheral state
+**I2C1 peripheral state**
 
 Base `0x40005400`:
 
@@ -61,9 +71,10 @@ Interpretation:
 - `SR2.MSL = 0` — slave mode.
 - `CR2.ITBUFEN = 1`, `ITEVTEN = 1`, `ITERREN = 1` — buffer/event/error IRQs enabled.
 
-This is the dangerous condition: slave transmitter with `TXE=1` and buffer interrupt enabled, but no data being supplied to `DR`.
+This is the dangerous condition: slave transmitter with `TXE=1` and buffer interrupt
+enabled, but no data being supplied to `DR`.
 
-### GPIO / clock stretching
+**GPIO / clock stretching**
 
 `GPIOB_IDR = 0x000006BB`, `GPIOB_ODR = 0x00000233`:
 
@@ -72,31 +83,37 @@ This is the dangerous condition: slave transmitter with `TXE=1` and buffer inter
 
 The STM32 was physically holding SCL low via slave clock stretching.
 
-## Root cause
+### Root cause
 
-The STM32F4 I2C slave can enter an unrecoverable event-interrupt loop when the ESP32 starts a read transaction while the application-level I2C slave FSM/HAL transmit state is not ready to provide a valid TX buffer. The peripheral enters slave-transmit phase with `TXE=1`, `TRA=1`, `BUSY=1`, and `ITBUFEN=1`. The peripheral stretches SCL low waiting for `DR` to be written, while the event IRQ remains active/re-enters continuously.
+The STM32F4 I2C slave can enter an unrecoverable event-interrupt loop when the ESP32
+starts a read transaction while the application-level I2C slave FSM/HAL transmit state
+is not ready to provide a valid TX buffer. The peripheral enters slave-transmit phase
+with `TXE=1`, `TRA=1`, `BUSY=1`, and `ITBUFEN=1`. The peripheral stretches SCL low
+waiting for `DR` to be written, while the event IRQ remains active/re-enters
+continuously.
 
-Task-level recovery is ineffective for this failure mode because FreeRTOS tasks do not get CPU time while the core is trapped in `I2C1_EV_IRQn`.
+Task-level recovery is ineffective for this failure mode because FreeRTOS tasks do not
+get CPU time while the core is trapped in `I2C1_EV_IRQn`.
 
-## Required protection model
+### Required protection model
 
 The fix must include independent layers:
 
-1. ISR-level detection of repeated `TXE && TRA && BUSY && ITBUFEN` in `I2C1_EV_IRQHandler`.
-2. Immediate unexpected-read handling that either provides a dummy TX byte or resets, never leaving TXE without data.
-3. Independent watchdog reset if interrupt livelock or any other CPU starvation prevents task-context feeding.
-4. Retained `.noinit` diagnostics so the next boot can report why the previous run reset.
-=======
-# STM32F411 I2C1 slave TXE ISR livelock — диагностика зависания
-
-Repository: `sip_periph`  
-Контекст: пост-фактум диагностика зависания, зафиксированного после PR #21 (`Harden I2C1 anti-hang path with multilayer watchdogs and staged STM32 recovery escalation`).
+1. ISR-level detection of repeated `TXE && TRA && BUSY && ITBUFEN` in
+   `I2C1_EV_IRQHandler`.
+2. Immediate unexpected-read handling that either provides a dummy TX byte or resets,
+   never leaving TXE without data.
+3. Independent watchdog reset if interrupt livelock or any other CPU starvation
+   prevents task-context feeding.
+4. Retained `.noinit` diagnostics so the next boot can report why the previous run
+   reset.
 
 ---
 
-## Краткий итог
+## Подробная диагностика (RU)
 
-Зафиксирован **ISR-level livelock** в `I2C1_EV_IRQn`, а не HardFault и не “обычное” зависание одной задачи FreeRTOS.
+Зафиксирован **ISR-level livelock** в `I2C1_EV_IRQn`, а не HardFault и не «обычное»
+зависание одной задачи FreeRTOS.
 
 Ключевое:
 
@@ -106,32 +123,30 @@ Repository: `sip_periph`
 - `GPIOB_IDR=0x06BB`, `PB6/SCL=LOW`, `PB7/SDA=HIGH` (физический clock stretching со стороны STM32 slave);
 - fault-регистры нулевые: `CFSR=0`, `HFSR=0`, `SHCSR=0`.
 
-Следствие: CPU постоянно занят в `I2C1_EV_IRQHandler`, `SysTick`/`PendSV` висят в pending и не исполняются, поэтому task-level watchdog/recovery из PR #21 не могут выполниться.
+Следствие: CPU постоянно занят в `I2C1_EV_IRQHandler`, `SysTick`/`PendSV` висят в pending
+и не исполняются, поэтому task-level watchdog/recovery из PR #21 не могут выполниться.
 
----
-
-## Наблюдаемые симптомы на устройстве
+### Наблюдаемые симптомы на устройстве
 
 - STM32F411 в состоянии `CPU: RUNNING` (STM32CubeProgrammer).
-- I2C1 slave-шина к ESP32 “залипает”: STM32 удерживает/растягивает SCL.
+- I2C1 slave-шина к ESP32 «залипает»: STM32 удерживает/растягивает SCL.
 - На DWIN/HMI перестаёт обновляться время.
 - DWIN touch перестаёт обрабатываться.
 - PN532-события не обрабатываются.
 - HardFault/MemManage/BusFault/UsageFault не фиксируются.
 
----
+### Почему debug-конфигурация не дала воспроизведение
 
-## Почему debug-конфигурация не дала воспроизведение
+В debug-конфигурации (STM32CubeIDE) зависание не повторялось, поэтому фиксация делалась
+через STM32CubeProgrammer в режиме hot-plug/live dump без остановки по fault-breakpoint.
 
-В debug-конфигурации (STM32CubeIDE) зависание не повторялось, поэтому фиксация делалась через STM32CubeProgrammer в режиме hot-plug/live dump без остановки по fault-breakpoint.
+Практический вывод: ошибка проявляется как timing-sensitive ISR livelock под реальной
+нагрузкой/времянками шины, а не как классический fault exception.
 
-Практический вывод: ошибка проявляется как timing-sensitive ISR livelock под реальной нагрузкой/времянками шины, а не как классический fault exception.
+### Как снимались данные
 
----
-
-## Как снимались данные
-
-Инструмент: STM32CubeProgrammer, hot-plug/live чтение регистров и памяти в момент уже наблюдаемого зависания (без reliance на fault handlers).
+Инструмент: STM32CubeProgrammer, hot-plug/live чтение регистров и памяти в момент уже
+наблюдаемого зависания (без reliance на fault handlers).
 
 Использованные артефакты:
 
@@ -143,9 +158,7 @@ Repository: `sip_periph`
 | `bak/GPIOB.bin` | Dump GPIOB (`0x40020400`, 48 байта) | Подтвердить физические уровни SCL/SDA |
 | `bak/MSP.bin` | Снимок MSP/stack контекста | Дополнительная forensic-проверка контекста исполнения |
 
----
-
-## Декодирование `ICSR`: CPU застрял в `I2C1_EV_IRQn`
+### Декодирование `ICSR`: CPU застрял в `I2C1_EV_IRQn`
 
 Из `bak/STM32F411.txt`:
 
@@ -163,25 +176,7 @@ VECTACTIVE = 0x2F
 - `External IRQn = 47 - 16 = 31`
 - на STM32F411 `IRQn 31 = I2C1_EV_IRQn`
 
-Дополнительное подтверждение: пользовательское наблюдение показывает, что `ICSR & 0x1FF = 0x2F` остаётся стабильным при повторных чтениях (не “моментальный” снимок, а устойчивое состояние).
-
----
-
-## Декодирование fault-регистров: это не HardFault
-
-Из `bak/STM32F411.txt`:
-
-```text
-CFSR  = 0x00000000
-HFSR  = 0x00000000
-SHCSR = 0x00000000
-```
-
-Вывод: fault exception отсутствует. Корневая проблема — ISR lock/livelock в обработке I2C1 event IRQ.
-
----
-
-## Декодирование `I2C1.bin`: slave-transmitter TXE loop
+### Декодирование `I2C1.bin`: slave-transmitter TXE loop
 
 Ключевые значения из `bak/I2C1.bin`:
 
@@ -197,80 +192,40 @@ SR2 = 0x00000006
 - `SR2=0x0006` → `BUSY=1`, `TRA=1`, `MSL=0` (slave transmitter),
 - `CR2=0x071E` → прерывания событий/буфера/ошибок включены (`ITEVTEN=1`, `ITBUFEN=1`, `ITERREN=1`).
 
-То есть мастер ESP32 начал read transaction, STM32 вошёл в slave-transmit фазу, но следующий байт в `DR` не подан. При `TXE=1` и `ITBUFEN=1` event IRQ остаётся активным/переактивируется, формируя бесконечный ISR цикл.
+Мастер ESP32 начал read transaction, STM32 вошёл в slave-transmit фазу, но следующий
+байт в `DR` не подан. При `TXE=1` и `ITBUFEN=1` event IRQ остаётся
+активным/переактивируется, формируя бесконечный ISR цикл.
+
+### Декодирование `GPIOB.bin`: подтверждение clock stretching
+
+`GPIOB_IDR = 0x000006BB` → `PB6/SCL = LOW`, `PB7/SDA = HIGH`. Это соответствует clock
+stretching со стороны STM32 slave в transmit phase.
+
+### Почему PR #21 не мог восстановить систему в этом кейсе
+
+PR #21 добавил полезные task-level watchdog/recovery слои, но они исполняются только
+когда scheduler получает квант CPU. В зафиксированном состоянии `SysTick` и `PendSV`
+уже pending, но поток исполнения непрерывно занят в `I2C1_EV_IRQn`, поэтому
+recovery-логика из задач не может стартовать.
 
 ---
 
-## Декодирование `GPIOB.bin`: подтверждение clock stretching
+## Resolution (this PR)
 
-Ключевое из `bak/GPIOB.bin`:
+This PR implements the first two protection layers from "Required protection model"
+and prepares the codebase for the third (IWDG):
 
-```text
-GPIOB_IDR = 0x000006BB
-```
+| # | Layer | Status | Files |
+|---|---|---|---|
+| 1 | ISR-level detection of `TXE && TRA && BUSY && ITBUFEN` in `I2C1_EV_IRQHandler` | **Implemented** — `app_i2c_slave_i2c1_ev_irq_guard_before_hal()` / `..._after_hal()` are now invoked around `HAL_I2C_EV_IRQHandler(&hi2c1)`; the spin threshold (`I2C1_ISR_TXE_TRA_BUSY_SPIN_LIMIT`) has been tightened from 256 to 64 entries to trigger within ~1 ms. On firing, `I2C1_EV/ER_IRQn` are masked, `CR2.ITEVTEN/ITBUFEN/ITERREN` and `CR1.PE` are cleared, the IRQ pending bit is cleared with `NVIC_ClearPendingIRQ` + `__DSB/__ISB`, so the core exits the vector and PendSV can finally run. | `Core/Src/stm32f4xx_it.c`, `Core/Src/app_i2c_slave.c` |
+| 2 | Unexpected-read handling that never leaves `TXE=1` with no data | **Implemented** — `app_i2c_slave_addr_callback()` now follows the policy `fast NACK/abort → dummy TX → controlled reset`. The fast path synchronously preloads `I2C1->DR` via the new `pre_arm_tx_buffer()` helper, guaranteeing TXE is cleared before the ISR exits. Repeated unexpected reads escalate through `unexpected_read_dummy_or_reset()` and finally to a controlled bus reset (`I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_RESET`) once `I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT` is hit, instead of staying in dummy mode forever. | `Core/Src/app_i2c_slave.c` |
+| 3 | Independent hardware watchdog (IWDG) | **Deferred** — the direct-register IWDG bring-up code is present (`APP_IWDG_Init()` in `Core/Src/main.c`) and the supervisor task `StartTaskWatchdog` already gates refreshes on `app_i2c_slave_watchdog_can_refresh()`. Enabling it requires flipping `APP_IWDG_ENABLE=1` and validating reset behaviour on the target — tracked as a follow-up PR. | (none in this PR) |
+| 4 | `.noinit` reset-reason diagnostics | **Reused** — all new ISR-driven paths persist via `persist_event_reason()` / `persist_i2c1_snapshot()` and bump the existing counters `i2c1_isr_txe_tra_busy_count` / `i2c1_unexpected_read_count`. `init_noinit_diag()` already preserves them across resets and `app_i2c_slave_init()` mirrors them into the boot-visible `s_diag` mirror. | `Core/Src/app_i2c_slave.c` |
 
-Для I2C1:
+### Out of scope
 
-- `PB6 = I2C1_SCL`,
-- `PB7 = I2C1_SDA`.
-
-По `GPIOB_IDR=0x06BB`:
-
-- `PB6/SCL = LOW`,
-- `PB7/SDA = HIGH`.
-
-Это соответствует clock stretching со стороны STM32 slave в transmit phase.
-
----
-
-## Root cause (зафиксированный вывод)
-
-**EN:**  
-`STM32F411 I2C1 slave can enter an unrecoverable slave-transmit TXE interrupt loop. When ESP32 starts a read transaction while the app-level I2C slave FSM/HAL state is not ready to provide a transmit buffer, I2C1 enters TRA/BUSY with TXE=1 and ITBUFEN enabled. The peripheral stretches SCL low waiting for DR to be written. Since the I2C1 event IRQ remains active/re-enters continuously, SysTick and PendSV remain pending and FreeRTOS tasks never run. Therefore task-level watchdog/recovery added in PR #21 cannot execute.`
-
-**RU:**  
-Причина зависания — не HardFault и не зависание одной задачи FreeRTOS, а ISR-level livelock в `I2C1_EV_IRQn`. Периферия I2C1 в состоянии slave transmitter (`TXE=1`, `BUSY=1`, `TRA=1`) с включённым buffer interrupt; STM32 удерживает SCL в LOW. CPU постоянно обслуживает `I2C1_EV_IRQn`, поэтому `SysTick/PendSV` и задачи FreeRTOS не выполняются. По этой причине task-level watchdog-и и staged recovery из PR #21 не могут сработать.
-
----
-
-## Почему PR #21 не мог восстановить систему в этом кейсе
-
-PR #21 добавил полезные task-level watchdog/recovery слои, но они исполняются только когда scheduler получает квант CPU.
-
-В зафиксированном состоянии:
-
-- `SysTick` уже pending (`STCSR=0x00010007`, `COUNTFLAG=1`),
-- `PendSV` pending (`ICSR.PENDSVSET=1`),
-- но поток исполнения непрерывно занят в `I2C1_EV_IRQn`.
-
-Итог: task-контекст не выполняется, поэтому recovery-логика из задач не может стартовать.
-
----
-
-## Следующие инженерные меры (рекомендации для будущего PR, не реализация в этом документе)
-
-1. Включить аппаратный `IWDG`; выполнять `IWDG refresh` только из task/supervisor context (не из ISR), в соответствии с правилом ISR-safe API (в ISR использовать только `*FromISR` и не выполнять task-level recovery прямо в обработчике).
-2. Добавить ISR-level guard в `I2C1_EV_IRQHandler` на патологическое состояние `TXE + TRA + BUSY`:
-   - guard должен быть lightweight и не выполнять тяжёлое восстановление внутри IRQ;
-   - сигнал в отложенный контекст передавать через `xTaskNotifyFromISR` (supervisor task) или recovery queue event;
-   - при использовании notify-path учитывать `portYIELD_FROM_ISR` для минимизации задержки обработки;
-   - само восстановление выполнять вне IRQ;
-   - дополнительно добавить pre-condition проверки перед включением `ITBUFEN`.
-3. В `unexpected-read` path не оставлять slave “без байта” и явно задать policy выбора реакции:
-   - порядок по умолчанию: `NACK/abort` → `dummy TX` → `controlled reset`;
-   - аварийный `NACK/abort` — применять первым при недопустимом состоянии FSM до начала выдачи полезных данных;
-   - `dummy TX` (предопределённый fail-safe байт, например `0xFF`) — применять, если транзакцию нужно быстро и детерминированно завершить без немедленного reset;
-   - `controlled reset` I2C1 state machine (через `I2C_CR1_SWRST` либо RCC peripheral reset) в отложенном контексте — применять, если состояние не нормализуется после abort/dummy path или повторяется в пределах контрольного окна.
-   После любой из веток обязателен гарантированный re-init/listen re-arm.
-   Тяжёлый reset-sequence не выполнять прямо внутри IRQ, кроме явно оговорённого last-resort сценария.
-4. Перед `NVIC_SystemReset()` сохранять код причины reset (и диагностический reason code) в `.noinit`.
-5. Сохранить task-level watchdog-и как вторичный слой защиты, явно учитывая, что при ISR lock они не исполняются.
-6. Пересмотреть использование `osPriorityRealtime` для I2C-задач (профилактика task-level starvation), но считать это вторичным фактором, не первопричиной данного ISR-зависания.
-
----
-
-## Scope заметки
-
-Этот документ фиксирует результаты диагностики и границы следующего PR.  
-Он **не** вносит изменений в firmware code path и не является реализацией recovery-механизмов.
->>>>>>> 13972f569c1b993bddaffda05627b48f5ab4c8a1
+- Migration of I2C tasks away from `osPriorityRealtime` (point 6 of the diagnosis —
+  explicitly secondary).
+- Enabling `IWDG` in production (point 3) — follow-up PR.
+- Any changes to `Drivers/`, `Middlewares/ST/`, linker scripts, or `sip_periph.ioc`
+  (forbidden by `AGENTS.md`).

@@ -51,8 +51,14 @@ extern osTimerId myTimerBuzzerOffHandle;
 #define I2C_SLAVE_SOFT_RECOVERY_LIMIT    2U
 #define I2C_SLAVE_FULL_RECOVERY_LIMIT    4U
 #define I2C_SLAVE_NOINIT_MAGIC           0x49524331UL /* "IRC1" */
-#define I2C1_ISR_TXE_TRA_BUSY_SPIN_LIMIT 256U
+/* Tightened from the historical 256 so the guard fires within ~1 ms even at
+ * 400 kHz fast-mode: each TXE/TRA/BUSY re-entry is on the order of a few µs,
+ * 64 re-entries ≈ a few hundred µs of CPU starvation before recovery. */
+#define I2C1_ISR_TXE_TRA_BUSY_SPIN_LIMIT 64U
 #define I2C1_UNEXPECTED_READ_RESET_LIMIT 16U
+/* Beyond this many consecutive unexpected reads, stop serving dummy bytes and
+ * escalate to a controlled I2C1 peripheral reset via schedule_recovery(). */
+#define I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT 64U
 #define DWIN_STATUS_VP_ADDR              0x5200U
 
 /* ---- Deferred processing flags (ISR sets, task processes) -------------- */
@@ -241,10 +247,16 @@ static void emergency_system_reset_from_isr(i2c_recovery_reason_t reason, uint32
     NVIC_DisableIRQ(I2C1_ER_IRQn);
     I2C1->CR2 &= (uint16_t)~(I2C_CR2_ITEVTEN | I2C_CR2_ITBUFEN | I2C_CR2_ITERREN);
     I2C1->CR1 &= (uint16_t)~I2C_CR1_PE;
+    /* Clear the I2C1 event IRQ pending bit so the core actually exits the
+     * vector on IRQ return. Without this, NVIC may immediately re-enter
+     * I2C1_EV_IRQn before PendSV gets a chance to run, defeating the guard. */
+    NVIC_ClearPendingIRQ(I2C1_EV_IRQn);
+    NVIC_ClearPendingIRQ(I2C1_ER_IRQn);
     s_diag.last_recovery_reason = (uint32_t)reason;
     s_recovery_reason = (uint8_t)reason;
     s_recovery_pending = 1U;
     __DSB();
+    __ISB();
     return;
 #else
     s_noinit_recovery.system_reset_count++;
@@ -262,7 +274,10 @@ static void emergency_system_reset_from_isr(i2c_recovery_reason_t reason, uint32
     NVIC_DisableIRQ(I2C1_ER_IRQn);
     I2C1->CR2 &= (uint16_t)~(I2C_CR2_ITEVTEN | I2C_CR2_ITBUFEN | I2C_CR2_ITERREN);
     I2C1->CR1 &= (uint16_t)~I2C_CR1_PE;
+    NVIC_ClearPendingIRQ(I2C1_EV_IRQn);
+    NVIC_ClearPendingIRQ(I2C1_ER_IRQn);
     __DSB();
+    __ISB();
     NVIC_SystemReset();
 #endif
 }
@@ -365,6 +380,59 @@ static void mark_malformed_and_recover(void)
     schedule_recovery(I2C_RECOVERY_REASON_MALFORMED);
 }
 
+/* Synchronously preload I2C1->DR with a fail-safe byte so the peripheral
+ * never sits in TXE=1 && ITBUFEN=1 with no data. Safe to call from ISR. */
+static void pre_arm_tx_buffer(uint8_t value)
+{
+    /* Writing DR clears TXE on STM32F4 I2C; do it before any subsequent
+     * decision so the next event IRQ cannot re-enter on an empty buffer. */
+    I2C1->DR = value;
+    __DSB();
+}
+
+/* Fast NACK/abort-equivalent path for unexpected slave-transmit requests.
+ * Returns 1 if the path was successfully applied, 0 if the caller should
+ * fall back to the heavier dummy-TX path.
+ *
+ * In F4 I2C slave mode, once the slave has ACKed its address it cannot
+ * truly NACK the master's read. The realistic equivalent is to:
+ *   - immediately preload DR with a fail-safe byte (clears TXE, releases SCL),
+ *   - clear CR1.ACK so we will NACK any further bytes the master tries to
+ *     pull (master will see end-of-frame),
+ *   - disable ITBUFEN so we don't get spurious TXE IRQs after this single
+ *     byte is shifted out.
+ * The master's NACK at end-of-transfer surfaces as HAL_I2C_ERROR_AF and is
+ * handled cleanly by app_i2c_slave_error()/restart_listen_if_needed(). */
+static uint8_t unexpected_read_fast_nack(I2C_HandleTypeDef *hi2c)
+{
+    HAL_I2C_StateTypeDef st = HAL_I2C_GetState(hi2c);
+
+    /* Only safe when HAL is still in pure listen mode; once it has set up
+     * a sequential TX transfer (HAL_I2C_STATE_BUSY_TX_LISTEN), let HAL run
+     * and use the dummy-TX path instead. */
+    if ((st != HAL_I2C_STATE_LISTEN) && (st != HAL_I2C_STATE_READY)) {
+        return 0U;
+    }
+
+    pre_arm_tx_buffer(s_i2c_dummy_tx ? s_i2c_dummy_tx : 0xFFU);
+    /* NACK any further bytes from this transaction. */
+    I2C1->CR1 &= (uint16_t)~I2C_CR1_ACK;
+    /* Stop further TXE IRQs for the rest of this transfer; ITEVTEN/ADDR
+     * stay enabled so we can re-arm on the next address match. */
+    I2C1->CR2 &= (uint16_t)~I2C_CR2_ITBUFEN;
+    __DSB();
+
+    s_i2c_dummy_tx_active = 1U;
+    s_diag.i2c1_unexpected_read_count++;
+    s_noinit_recovery.i2c1_unexpected_read_count++;
+    persist_event_reason(I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_DUMMY_TX);
+    if (s_i2c1_unexpected_read_consecutive < 0xFFU) {
+        s_i2c1_unexpected_read_consecutive++;
+    }
+    note_progress(I2C_SLAVE_PAYLOAD_TIMEOUT_MS);
+    return 1U;
+}
+
 static void unexpected_read_dummy_or_reset(I2C_HandleTypeDef *hi2c)
 {
     HAL_StatusTypeDef st;
@@ -379,12 +447,24 @@ static void unexpected_read_dummy_or_reset(I2C_HandleTypeDef *hi2c)
     s_noinit_recovery.i2c1_unexpected_read_count++;
     persist_event_reason(I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_DUMMY_TX);
 
+    /* Escalate to a controlled I2C1 peripheral reset if the master keeps
+     * issuing unexpected reads — staying in dummy-TX mode forever would
+     * hide a real protocol-level desync from the supervisor task. */
+    if (s_i2c1_unexpected_read_consecutive >= I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT) {
+        s_i2c1_unexpected_read_consecutive = I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT;
+        schedule_recovery(I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_RESET);
+        /* Still preload DR so the current in-flight transfer doesn't spin
+         * waiting for a byte before the recovery task gets to run. */
+        pre_arm_tx_buffer(s_i2c_dummy_tx ? s_i2c_dummy_tx : 0xFFU);
+        I2C1->CR2 &= (uint16_t)~I2C_CR2_ITBUFEN;
+        __DSB();
+        return;
+    }
     if (s_i2c1_unexpected_read_consecutive >= I2C1_UNEXPECTED_READ_RESET_LIMIT) {
-        /* Keep liveness on noisy boot/probing masters: continue serving a
-         * one-byte dummy response instead of entering a reset/recovery loop.
-         * The ISR TXE/TRA/BUSY guard remains the last-resort protection if the
+        /* Between the soft limit and the controlled-reset limit we keep
+         * serving dummy bytes but do not yet trigger heavy recovery — the
+         * ISR TXE/TRA/BUSY guard remains the last-resort protection if the
          * peripheral really livelocks. */
-        s_i2c1_unexpected_read_consecutive = I2C1_UNEXPECTED_READ_RESET_LIMIT;
     }
 
     reg = (is_known_register(s_i2c_sec_ctrl_h.offset) != 0U) ? s_i2c_sec_ctrl_h.offset : s_legacy_last_offset;
@@ -740,6 +820,17 @@ static void execute_pending_recovery(void)
     if ((reason == I2C_RECOVERY_REASON_STUCK_SCL) || (reason == I2C_RECOVERY_REASON_STUCK_SDA)) {
         reset_fsm_state();
         note_recovery_duration();
+        return;
+    }
+
+    /* Reasons surfaced by the ISR-level guard or the controlled-reset path
+     * mean the peripheral was either disabled (PE cleared, NVIC IRQs masked)
+     * by emergency_system_reset_from_isr() or is in a state where re-arming
+     * LISTEN alone is not sufficient. Always go through hard_recover_bus()
+     * so HAL_I2C_DeInit/Init runs and HAL_I2C_MspInit re-enables NVIC. */
+    if ((reason == I2C_RECOVERY_REASON_I2C1_ISR_TXE_TRA_BUSY_SPIN)
+     || (reason == I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_RESET)) {
+        hard_recover_bus();
         return;
     }
 
@@ -1257,7 +1348,19 @@ void app_i2c_slave_addr_callback(I2C_HandleTypeDef *hi2c, uint8_t Direction, uin
             note_progress(I2C_SLAVE_PAYLOAD_TIMEOUT_MS);
             HAL_I2C_Slave_Seq_Transmit_IT(hi2c, &s_ram[s_i2c_sec_ctrl_h.offset], (uint16_t)tx_len, I2C_LAST_FRAME);
         } else {
-            unexpected_read_dummy_or_reset(hi2c);
+            /* Tier 1: fast NACK/abort — synchronously preload DR + clear ACK
+             * so the master sees end-of-frame after a single fail-safe byte.
+             * This guarantees TXE is cleared before this ISR exits, breaking
+             * any potential TXE/TRA/BUSY spin at its source.
+             *
+             * Tier 2: if HAL is already past pure-listen state, fall back to
+             * the heavier dummy-TX path (unexpected_read_dummy_or_reset),
+             * which uses HAL_I2C_Slave_Seq_Transmit_IT to publish dummy
+             * bytes and (after I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT)
+             * schedules a controlled peripheral reset. */
+            if (unexpected_read_fast_nack(hi2c) == 0U) {
+                unexpected_read_dummy_or_reset(hi2c);
+            }
         }
     }
 }
