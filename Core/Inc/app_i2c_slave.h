@@ -27,32 +27,14 @@ typedef struct {
     uint32_t progress_timeout_count;
     uint32_t stuck_scl_count;
     uint32_t stuck_sda_count;
-    uint32_t outbox_timeout_count;
-    uint32_t event_low_timeout_count;
-    uint32_t queue_stall_count;
-    uint32_t dwin_stall_count;
-    uint32_t touch_stall_count;
     uint32_t abort_count;
     uint32_t relisten_count;
     uint32_t hard_recover_count;
-    uint32_t full_reinit_count;
-    uint32_t system_reset_count;
     uint32_t malformed_count;
     uint32_t recover_fail_count;
     uint32_t last_recovery_ms;
     uint32_t max_recovery_ms;
     uint32_t last_progress_tick;
-    uint32_t last_recovery_reason;
-    uint32_t boot_reset_reason;
-    uint32_t boot_count;
-    uint32_t last_event_reason;
-    uint32_t i2c1_isr_txe_tra_busy_count;
-    uint32_t i2c1_unexpected_read_count;
-    uint32_t iwdg_supervisor_timeout_count;
-    uint32_t last_i2c1_sr1;
-    uint32_t last_i2c1_sr2;
-    uint32_t last_i2c1_cr2;
-    uint32_t last_gpiob_idr;
 } app_i2c_slave_diag_t;
 
 void app_i2c_slave_init(void);
@@ -71,10 +53,6 @@ void StartTaskRxTxI2c1(void const *argument);
 void StartTaskI2cGuard(void const *argument);
 void app_i2c_slave_note_dwin_activity(void);
 void app_i2c_slave_note_touch_activity(void);
-void app_i2c_slave_i2c1_ev_irq_guard_before_hal(void);
-void app_i2c_slave_i2c1_ev_irq_guard_after_hal(void);
-void app_i2c_slave_note_iwdg_supervisor_timeout(void);
-uint8_t app_i2c_slave_watchdog_can_refresh(uint32_t max_i2c_guard_stale_ms);
 
 /* HAL callback delegates */
 void app_i2c_slave_abort_complete(I2C_HandleTypeDef *hi2c);

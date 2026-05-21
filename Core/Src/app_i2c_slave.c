@@ -24,13 +24,9 @@
 extern I2C_HandleTypeDef hi2c1;
 extern osMessageQId myQueueToMasterHandle;
 extern osMessageQId myQueueHmiMsgHandle;
-extern osMessageQId myQueueHMIRecvRawHandle;
 extern osTimerId myTimerBuzzerOffHandle;
 
 /* ---- recovery policy ----------------------------------------------------- */
-#ifndef APP_BRINGUP_NO_RESET
-#define APP_BRINGUP_NO_RESET              1U
-#endif
 #define I2C_SLAVE_HEADER_TIMEOUT_MS      50U
 #define I2C_SLAVE_PAYLOAD_TIMEOUT_MS     100U
 #define I2C_SLAVE_IDLE_STUCK_TIMEOUT_MS  500U
@@ -40,93 +36,6 @@ extern osTimerId myTimerBuzzerOffHandle;
 #define I2C_SLAVE_OUTBOX_RETRY_DELAY_MS  20U
 #define I2C_SLAVE_STUCK_CONFIRM_POLLS    3U
 #define I2C_SLAVE_STUCK_CONFIRM_MS       15U
-#define I2C_SLAVE_STUCK_LINE_REPORT_MS   1000U
-#define I2C_SLAVE_OUTBOX_TIMEOUT_MS      500U
-#define I2C_SLAVE_EVENT_LOW_TIMEOUT_MS   500U
-#define I2C_SLAVE_QUEUE_STALL_TIMEOUT_MS 500U
-#define I2C_SLAVE_DWIN_STALL_TIMEOUT_MS  5000U
-#define I2C_SLAVE_TOUCH_STALL_TIMEOUT_MS 1000U
-#define I2C_SLAVE_RXTX_IDLE_POLL_MS      20U
-#define I2C_SLAVE_PRE_RESET_DELAY_MS     20U
-#define I2C_SLAVE_SOFT_RECOVERY_LIMIT    2U
-#define I2C_SLAVE_FULL_RECOVERY_LIMIT    4U
-#define I2C_SLAVE_NOINIT_MAGIC           0x49524331UL /* "IRC1" */
-/* Tightened from the historical 256 so the guard fires within ~1 ms even at
- * 400 kHz fast-mode: each TXE/TRA/BUSY re-entry is on the order of a few µs,
- * 64 re-entries ≈ a few hundred µs of CPU starvation before recovery. */
-#define I2C1_ISR_TXE_TRA_BUSY_SPIN_LIMIT 64U
-/* Signature-independent ISR-storm guard: count I2C1_EV_IRQHandler entries while
- * HAL_GetTick() (driven by SysTick) does not advance. If SysTick is starved,
- * PendSV cannot run and the supervisor task can never recover — regardless of
- * which SR1/SR2 signature the peripheral is in (slave-receiver vs transmitter,
- * ADDR-NACK storm, AF storm, etc).
- *
- * Threshold sizing: SysTick = 1 ms. At 400 kHz fast-mode an ESP32 master can
- * legitimately produce ~50 bytes/ms × several IRQ entries per byte = several
- * hundred entries within a single tick on bursty but healthy traffic. A real
- * starvation lasts tens of ms (otherwise PendSV/watchdog timeouts do not
- * trigger). 128 was tuned too tight after PR#24 and produced false positives
- * that drove HdRcv (hard_recover_count) up on healthy traffic. 4096 keeps the
- * guard armed for true multi-ms starvation while staying well clear of any
- * legitimate burst. */
-#define I2C1_ISR_STARVATION_ENTRIES_LIMIT 4096U
-#define I2C1_UNEXPECTED_READ_RESET_LIMIT 16U
-/* Beyond this many consecutive unexpected reads, stop serving dummy bytes and
- * escalate to a controlled I2C1 peripheral reset.
- *
- * History: 64 (original) → 8 (PR#24, too aggressive — turned normal protocol
- * re-syncs into HdRcv++ storms and broke master→write because every retry
- * after hard_recover_bus() immediately re-escalated) → 32 (current). 32 is
- * comfortably above the 16-entry soft RESET_LIMIT and well below anything
- * that could starve PendSV. The fast-NACK path must also escalate at this
- * limit because an ADDR retry storm can keep hitting that path and never reach
- * the heavier dummy-TX branch. */
-#define I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT 32U
-#define DWIN_STATUS_VP_ADDR              0x5200U
-
-/* ---- Deferred processing flags (ISR sets, task processes) -------------- */
-#define DEFERRED_NONE           0x00U
-#define DEFERRED_TIME_SYNC      0x01U
-#define DEFERRED_AUTH_RESULT    0x02U
-
-typedef enum {
-    I2C_RECOVERY_REASON_NONE = 0U,
-    I2C_RECOVERY_REASON_PHASE_TIMEOUT = 1U,
-    I2C_RECOVERY_REASON_STUCK_SCL = 2U,
-    I2C_RECOVERY_REASON_STUCK_SDA = 3U,
-    I2C_RECOVERY_REASON_MALFORMED = 4U,
-    I2C_RECOVERY_REASON_OUTBOX_TIMEOUT = 5U,
-    I2C_RECOVERY_REASON_EVENT_LOW_TIMEOUT = 6U,
-    I2C_RECOVERY_REASON_MASTER_QUEUE_STALL = 7U,
-    I2C_RECOVERY_REASON_DWIN_STALL = 8U,
-    I2C_RECOVERY_REASON_TOUCH_STALL = 9U,
-    I2C_RECOVERY_REASON_ABORT = 10U,
-    I2C_RECOVERY_REASON_HARD_LIMIT = 11U,
-    I2C_RECOVERY_REASON_I2C1_ISR_TXE_TRA_BUSY_SPIN = 12U,
-    I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_DUMMY_TX = 13U,
-    I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_RESET = 14U,
-    I2C_RECOVERY_REASON_IWDG_SUPERVISOR_TIMEOUT = 15U,
-    I2C_RECOVERY_REASON_I2C1_ISR_STARVATION = 16U,
-} i2c_recovery_reason_t;
-
-typedef struct {
-    uint32_t magic;
-    uint32_t boot_count;
-    uint32_t last_reset_reason;
-    uint32_t system_reset_count;
-    uint32_t full_reinit_count;
-    uint32_t hard_recover_count;
-    uint32_t outbox_timeout_count;
-    uint32_t queue_stall_count;
-    uint32_t last_event_reason;
-    uint32_t i2c1_isr_txe_tra_busy_count;
-    uint32_t i2c1_unexpected_read_count;
-    uint32_t iwdg_supervisor_timeout_count;
-    uint32_t last_i2c1_sr1;
-    uint32_t last_i2c1_sr2;
-    uint32_t last_i2c1_cr2;
-    uint32_t last_gpiob_idr;
-} i2c_recovery_noinit_t;
 
 /* ---- local state -------------------------------------------------------- */
 static uint8_t s_ram[256];
@@ -165,42 +74,10 @@ static volatile uint8_t s_idle_scl_low_polls = 0U;
 static volatile uint8_t s_idle_sda_low_polls = 0U;
 static volatile uint32_t s_idle_scl_low_since_tick = 0U;
 static volatile uint32_t s_idle_sda_low_since_tick = 0U;
-static volatile uint32_t s_last_stuck_scl_report_tick = 0U;
-static volatile uint32_t s_last_stuck_sda_report_tick = 0U;
-static volatile uint8_t s_recovery_reason = I2C_RECOVERY_REASON_NONE;
-static volatile uint8_t s_recovery_attempts = 0U;
-static volatile uint32_t s_outbox_busy_since_tick = 0U;
-static volatile uint32_t s_event_low_since_tick = 0U;
-static volatile uint32_t s_last_master_queue_activity_tick = 0U;
-static volatile uint32_t s_last_dwin_activity_tick = 0U;
-static volatile uint32_t s_last_touch_activity_tick = 0U;
-static volatile uint8_t s_dwin_watchdog_armed = 0U;
-static volatile uint8_t s_touch_watchdog_armed = 0U;
-static volatile uint8_t s_deferred_action = DEFERRED_NONE;
-static volatile uint32_t s_i2c_guard_heartbeat_tick = 0U;
-static volatile uint16_t s_i2c1_ev_txe_tra_busy_spin_count = 0U;
-static volatile uint16_t s_i2c1_ev_irq_entries_since_tick = 0U;
-static volatile uint32_t s_i2c1_ev_irq_last_seen_tick = 0U;
-static volatile uint8_t s_i2c1_unexpected_read_consecutive = 0U;
-static volatile uint8_t s_i2c_dummy_tx_active = 0U;
-static volatile uint8_t s_legacy_last_offset = I2C_PACKET_TYPE_ADDR;
-static uint8_t s_i2c_dummy_tx = 0x00U;
-/* NOTE: .noinit section is used intentionally so watchdog/reset counters survive
- * NVIC_SystemReset()/IWDG reset. Linker scripts place .noinit as NOLOAD after
- * .bss, outside the startup zero-init range. */
-__attribute__((section(".noinit"))) static volatile i2c_recovery_noinit_t s_noinit_recovery;
 static app_i2c_slave_diag_t s_diag = {0};
 
 /* ---- forward declarations ----------------------------------------------- */
 static void process_deferred_actions(void);
-static void schedule_recovery(i2c_recovery_reason_t reason);
-static void full_service_reinit(void);
-static void persist_reset_reason(i2c_recovery_reason_t reason);
-static void persist_event_reason(i2c_recovery_reason_t reason);
-static void persist_i2c1_snapshot(uint32_t sr1, uint32_t sr2, uint32_t cr2);
-static void emergency_system_reset_from_isr(i2c_recovery_reason_t reason, uint32_t sr1, uint32_t sr2, uint32_t cr2);
-static uint8_t is_known_register(uint8_t base);
-static uint8_t legacy_read_len_for_register(uint8_t reg);
 
 /* ---- internal helpers --------------------------------------------------- */
 static uint32_t tick_now(void)
@@ -213,182 +90,12 @@ static uint8_t tick_expired(uint32_t now, uint32_t deadline)
     return (deadline != 0U) && ((int32_t)(now - deadline) >= 0);
 }
 
-static void init_noinit_diag(void)
-{
-    if (s_noinit_recovery.magic != I2C_SLAVE_NOINIT_MAGIC) {
-        memset((void*)&s_noinit_recovery, 0, sizeof(s_noinit_recovery));
-        s_noinit_recovery.magic = I2C_SLAVE_NOINIT_MAGIC;
-    }
-    s_noinit_recovery.boot_count++;
-}
-
-static void ensure_noinit_diag_from_isr(void)
-{
-    if (s_noinit_recovery.magic != I2C_SLAVE_NOINIT_MAGIC) {
-        volatile uint32_t *p = (volatile uint32_t *)&s_noinit_recovery;
-        uint32_t words = (uint32_t)(sizeof(s_noinit_recovery) / sizeof(uint32_t));
-        for (uint32_t i = 0U; i < words; i++) {
-            p[i] = 0U;
-        }
-        s_noinit_recovery.magic = I2C_SLAVE_NOINIT_MAGIC;
-    }
-}
-
-static void persist_reset_reason(i2c_recovery_reason_t reason)
-{
-    ensure_noinit_diag_from_isr();
-    s_noinit_recovery.last_reset_reason = (uint32_t)reason;
-}
-
-static void persist_event_reason(i2c_recovery_reason_t reason)
-{
-    ensure_noinit_diag_from_isr();
-    s_noinit_recovery.last_event_reason = (uint32_t)reason;
-}
-
-static void persist_i2c1_snapshot(uint32_t sr1, uint32_t sr2, uint32_t cr2)
-{
-    ensure_noinit_diag_from_isr();
-    s_noinit_recovery.last_i2c1_sr1 = sr1;
-    s_noinit_recovery.last_i2c1_sr2 = sr2;
-    s_noinit_recovery.last_i2c1_cr2 = cr2;
-    s_noinit_recovery.last_gpiob_idr = GPIOB->IDR;
-}
-
-static void emergency_system_reset_from_isr(i2c_recovery_reason_t reason, uint32_t sr1, uint32_t sr2, uint32_t cr2)
-{
-    ensure_noinit_diag_from_isr();
-#if APP_BRINGUP_NO_RESET
-    if (reason == I2C_RECOVERY_REASON_I2C1_ISR_TXE_TRA_BUSY_SPIN) {
-        s_noinit_recovery.i2c1_isr_txe_tra_busy_count++;
-    } else if (reason == I2C_RECOVERY_REASON_I2C1_ISR_STARVATION) {
-        /* Reuse the ISR-livelock counter — both signal "ISR-level livelock";
-         * the distinguishing detail is preserved in last_event_reason and the
-         * sr1/sr2/cr2 snapshot below. */
-        s_noinit_recovery.i2c1_isr_txe_tra_busy_count++;
-    } else if (reason == I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_RESET) {
-        s_noinit_recovery.i2c1_unexpected_read_count++;
-    } else if (reason == I2C_RECOVERY_REASON_IWDG_SUPERVISOR_TIMEOUT) {
-        s_noinit_recovery.iwdg_supervisor_timeout_count++;
-    }
-    persist_event_reason(reason);
-    persist_i2c1_snapshot(sr1, sr2, cr2);
-
-    NVIC_DisableIRQ(I2C1_EV_IRQn);
-    NVIC_DisableIRQ(I2C1_ER_IRQn);
-    I2C1->CR2 &= (uint16_t)~(I2C_CR2_ITEVTEN | I2C_CR2_ITBUFEN | I2C_CR2_ITERREN);
-    I2C1->CR1 &= (uint16_t)~I2C_CR1_PE;
-    /* Clear the I2C1 event IRQ pending bit so the core actually exits the
-     * vector on IRQ return. Without this, NVIC may immediately re-enter
-     * I2C1_EV_IRQn before PendSV gets a chance to run, defeating the guard. */
-    NVIC_ClearPendingIRQ(I2C1_EV_IRQn);
-    NVIC_ClearPendingIRQ(I2C1_ER_IRQn);
-    s_diag.last_recovery_reason = (uint32_t)reason;
-    s_recovery_reason = (uint8_t)reason;
-    s_recovery_pending = 1U;
-    __DSB();
-    __ISB();
-    return;
-#else
-    s_noinit_recovery.system_reset_count++;
-    if (reason == I2C_RECOVERY_REASON_I2C1_ISR_TXE_TRA_BUSY_SPIN) {
-        s_noinit_recovery.i2c1_isr_txe_tra_busy_count++;
-    } else if (reason == I2C_RECOVERY_REASON_I2C1_ISR_STARVATION) {
-        s_noinit_recovery.i2c1_isr_txe_tra_busy_count++;
-    } else if (reason == I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_RESET) {
-        s_noinit_recovery.i2c1_unexpected_read_count++;
-    } else if (reason == I2C_RECOVERY_REASON_IWDG_SUPERVISOR_TIMEOUT) {
-        s_noinit_recovery.iwdg_supervisor_timeout_count++;
-    }
-    s_noinit_recovery.last_reset_reason = (uint32_t)reason;
-    persist_i2c1_snapshot(sr1, sr2, cr2);
-
-    NVIC_DisableIRQ(I2C1_EV_IRQn);
-    NVIC_DisableIRQ(I2C1_ER_IRQn);
-    I2C1->CR2 &= (uint16_t)~(I2C_CR2_ITEVTEN | I2C_CR2_ITBUFEN | I2C_CR2_ITERREN);
-    I2C1->CR1 &= (uint16_t)~I2C_CR1_PE;
-    NVIC_ClearPendingIRQ(I2C1_EV_IRQn);
-    NVIC_ClearPendingIRQ(I2C1_ER_IRQn);
-    __DSB();
-    __ISB();
-    NVIC_SystemReset();
-#endif
-}
-
-static uint8_t i2c1_is_txe_tra_busy_stretch(uint32_t *sr1_out, uint32_t *sr2_out, uint32_t *cr2_out)
-{
-    uint32_t sr1 = I2C1->SR1;
-    uint32_t sr2 = 0U;
-    uint32_t cr2 = I2C1->CR2;
-
-    /* Reading SR2 clears ADDR, so do not sample SR2 while ADDR is pending. */
-    if ((sr1 & I2C_SR1_ADDR) == 0U) {
-        sr2 = I2C1->SR2;
-    }
-
-    if (sr1_out != NULL) *sr1_out = sr1;
-    if (sr2_out != NULL) *sr2_out = sr2;
-    if (cr2_out != NULL) *cr2_out = cr2;
-
-    return (uint8_t)(((sr1 & I2C_SR1_TXE) != 0U)
-                  && ((sr2 & I2C_SR2_TRA) != 0U)
-                  && ((sr2 & I2C_SR2_BUSY) != 0U)
-                  && ((cr2 & I2C_CR2_ITBUFEN) != 0U));
-}
-
-static void i2c1_ev_irq_guard_sample(void)
-{
-    uint32_t sr1;
-    uint32_t sr2;
-    uint32_t cr2;
-    uint32_t now_tick = HAL_GetTick();
-
-    /* Signature-independent ISR-storm detector.
-     *
-     * If `HAL_GetTick()` (driven by SysTick) does not advance between two
-     * consecutive entries into I2C1_EV_IRQHandler, SysTick is starved — which
-     * means PendSV is also starved and FreeRTOS cannot run the supervisor
-     * task. After more than I2C1_ISR_STARVATION_ENTRIES_LIMIT such entries
-     * in a row, the bus is effectively dead regardless of the SR1/SR2/CR2
-     * signature, and we must mask the IRQ so the core can finally leave the
-     * vector. This complements (does not replace) the TXE/TRA/BUSY/ITBUFEN
-     * detector below, which only sees the slave-transmitter signature. */
-    if (now_tick != s_i2c1_ev_irq_last_seen_tick) {
-        s_i2c1_ev_irq_last_seen_tick = now_tick;
-        s_i2c1_ev_irq_entries_since_tick = 0U;
-    } else if (s_i2c1_ev_irq_entries_since_tick < 0xFFFFU) {
-        s_i2c1_ev_irq_entries_since_tick++;
-    }
-    if (s_i2c1_ev_irq_entries_since_tick >= I2C1_ISR_STARVATION_ENTRIES_LIMIT) {
-        uint32_t sr1_s = I2C1->SR1;
-        uint32_t sr2_s = ((sr1_s & I2C_SR1_ADDR) == 0U) ? I2C1->SR2 : 0U;
-        uint32_t cr2_s = I2C1->CR2;
-        s_i2c1_ev_irq_entries_since_tick = 0U;
-        emergency_system_reset_from_isr(I2C_RECOVERY_REASON_I2C1_ISR_STARVATION,
-                                        sr1_s, sr2_s, cr2_s);
-        return;
-    }
-
-    if (i2c1_is_txe_tra_busy_stretch(&sr1, &sr2, &cr2) == 0U) {
-        s_i2c1_ev_txe_tra_busy_spin_count = 0U;
-        return;
-    }
-
-    if (s_i2c1_ev_txe_tra_busy_spin_count < 0xFFFFU) {
-        s_i2c1_ev_txe_tra_busy_spin_count++;
-    }
-    if (s_i2c1_ev_txe_tra_busy_spin_count >= I2C1_ISR_TXE_TRA_BUSY_SPIN_LIMIT) {
-        emergency_system_reset_from_isr(I2C_RECOVERY_REASON_I2C1_ISR_TXE_TRA_BUSY_SPIN, sr1, sr2, cr2);
-    }
-}
-
 static void note_progress(uint32_t timeout_ms)
 {
     uint32_t now = tick_now();
     s_last_progress_tick = now;
     s_phase_deadline_tick = now + timeout_ms;
     s_diag.last_progress_tick = now;
-    s_recovery_attempts = 0U;
 }
 
 static void clear_progress_watchdog(void)
@@ -400,19 +107,6 @@ static void clear_progress_watchdog(void)
     s_idle_sda_low_polls = 0U;
     s_idle_scl_low_since_tick = 0U;
     s_idle_sda_low_since_tick = 0U;
-}
-
-static uint8_t stuck_line_report_due(uint32_t now, volatile uint32_t *last_report_tick)
-{
-    if ((last_report_tick == NULL)
-     || (*last_report_tick == 0U)
-     || tick_expired(now, *last_report_tick + I2C_SLAVE_STUCK_LINE_REPORT_MS)) {
-        if (last_report_tick != NULL) {
-            *last_report_tick = now;
-        }
-        return 1U;
-    }
-    return 0U;
 }
 
 static uint8_t i2c1_line_is_low(uint16_t pin)
@@ -437,132 +131,7 @@ static void note_recovery_duration(void)
 static void mark_malformed_and_recover(void)
 {
     s_diag.malformed_count++;
-    schedule_recovery(I2C_RECOVERY_REASON_MALFORMED);
-}
-
-/* Synchronously preload I2C1->DR with a fail-safe byte so the peripheral
- * never sits in TXE=1 && ITBUFEN=1 with no data. Safe to call from ISR. */
-static void pre_arm_tx_buffer(uint8_t value)
-{
-    /* Writing DR clears TXE on STM32F4 I2C; do it before any subsequent
-     * decision so the next event IRQ cannot re-enter on an empty buffer. */
-    I2C1->DR = value;
-    __DSB();
-}
-
-/* Fast NACK/abort-equivalent path for unexpected slave-transmit requests.
- * Returns 1 if the path was successfully applied, 0 if the caller should
- * fall back to the heavier dummy-TX path.
- *
- * In F4 I2C slave mode, once the slave has ACKed its address it cannot
- * truly NACK the master's read. The realistic equivalent is to:
- *   - immediately preload DR with a fail-safe byte (clears TXE, releases SCL),
- *   - clear CR1.ACK so we will NACK any further bytes the master tries to
- *     pull (master will see end-of-frame),
- *   - disable ITBUFEN so we don't get spurious TXE IRQs after this single
- *     byte is shifted out.
- * The master's NACK at end-of-transfer surfaces as HAL_I2C_ERROR_AF and is
- * handled cleanly by app_i2c_slave_error()/restart_listen_if_needed(). */
-static uint8_t unexpected_read_fast_nack(I2C_HandleTypeDef *hi2c)
-{
-    HAL_I2C_StateTypeDef st = HAL_I2C_GetState(hi2c);
-
-    /* Only safe when HAL is still in pure listen mode; once it has set up
-     * a sequential TX transfer (HAL_I2C_STATE_BUSY_TX_LISTEN), let HAL run
-     * and use the dummy-TX path instead. */
-    if ((st != HAL_I2C_STATE_LISTEN) && (st != HAL_I2C_STATE_READY)) {
-        return 0U;
-    }
-
-    pre_arm_tx_buffer(s_i2c_dummy_tx ? s_i2c_dummy_tx : 0xFFU);
-    /* NACK any further bytes from this transaction. */
-    I2C1->CR1 &= (uint16_t)~I2C_CR1_ACK;
-    /* Stop further TXE IRQs for the rest of this transfer; ITEVTEN/ADDR
-     * stay enabled so we can re-arm on the next address match. */
-    I2C1->CR2 &= (uint16_t)~I2C_CR2_ITBUFEN;
-    __DSB();
-
-    s_i2c_dummy_tx_active = 1U;
-    s_diag.i2c1_unexpected_read_count++;
-    s_noinit_recovery.i2c1_unexpected_read_count++;
-    persist_event_reason(I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_DUMMY_TX);
-    if (s_i2c1_unexpected_read_consecutive < 0xFFU) {
-        s_i2c1_unexpected_read_consecutive++;
-    }
-    /* If the master keeps issuing unexpected reads, the fast-NACK path can be
-     * hit repeatedly and the heavier dummy-TX reset branch is never reached.
-     * Escalate from here too, but only at the relaxed post-PR#25 limit and
-     * with hard_recover_bus() clearing this counter afterwards, so a transient
-     * re-sync burst does not become the PR#24 permanent HdRcv storm. */
-    if (s_i2c1_unexpected_read_consecutive >= I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT) {
-        uint32_t sr1_s = I2C1->SR1;
-        uint32_t sr2_s = ((sr1_s & I2C_SR1_ADDR) == 0U) ? I2C1->SR2 : 0U;
-        uint32_t cr2_s = I2C1->CR2;
-        s_i2c1_unexpected_read_consecutive = I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT;
-        emergency_system_reset_from_isr(I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_RESET,
-                                        sr1_s, sr2_s, cr2_s);
-        return 1U;
-    }
-    note_progress(I2C_SLAVE_PAYLOAD_TIMEOUT_MS);
-    return 1U;
-}
-
-static void unexpected_read_dummy_or_reset(I2C_HandleTypeDef *hi2c)
-{
-    HAL_StatusTypeDef st;
-    uint8_t reg;
-    uint8_t tx_len;
-
-    ensure_noinit_diag_from_isr();
-    if (s_i2c1_unexpected_read_consecutive < 0xFFU) {
-        s_i2c1_unexpected_read_consecutive++;
-    }
-    s_diag.i2c1_unexpected_read_count++;
-    s_noinit_recovery.i2c1_unexpected_read_count++;
-    persist_event_reason(I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_DUMMY_TX);
-
-    /* Escalate to a controlled I2C1 peripheral reset if the master keeps
-     * issuing unexpected reads — staying in dummy-TX mode forever would
-     * hide a real protocol-level desync from the supervisor task. */
-    if (s_i2c1_unexpected_read_consecutive >= I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT) {
-        s_i2c1_unexpected_read_consecutive = I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT;
-        schedule_recovery(I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_RESET);
-        /* Still preload DR so the current in-flight transfer doesn't spin
-         * waiting for a byte before the recovery task gets to run. */
-        pre_arm_tx_buffer(s_i2c_dummy_tx ? s_i2c_dummy_tx : 0xFFU);
-        I2C1->CR2 &= (uint16_t)~I2C_CR2_ITBUFEN;
-        __DSB();
-        return;
-    }
-    if (s_i2c1_unexpected_read_consecutive >= I2C1_UNEXPECTED_READ_RESET_LIMIT) {
-        /* Between the soft limit and the controlled-reset limit we keep
-         * serving dummy bytes but do not yet trigger heavy recovery — the
-         * ISR TXE/TRA/BUSY guard remains the last-resort protection if the
-         * peripheral really livelocks. */
-    }
-
-    reg = (is_known_register(s_i2c_sec_ctrl_h.offset) != 0U) ? s_i2c_sec_ctrl_h.offset : s_legacy_last_offset;
-    if (is_known_register(reg) == 0U) {
-        reg = I2C_PACKET_TYPE_ADDR;
-    }
-    tx_len = legacy_read_len_for_register(reg);
-    if ((uint16_t)reg + (uint16_t)tx_len > sizeof(s_ram)) {
-        tx_len = (uint8_t)(sizeof(s_ram) - (uint16_t)reg);
-    }
-
-    s_i2c_sec_ctrl_h.offset = reg;
-    s_i2c_sec_ctrl_h.second = 0U;
-    s_i2c_sec_ctrl_h.final = 1U;
-    s_i2c_sec_ctrl_h.rx_count = tx_len;
-    s_i2c_sec_ctrl_h.tx_count = tx_len;
-    s_last_tx_reg = reg;
-    s_last_tx_len = tx_len;
-    s_i2c_dummy_tx_active = 0U;
-    note_progress(I2C_SLAVE_PAYLOAD_TIMEOUT_MS);
-    st = HAL_I2C_Slave_Seq_Transmit_IT(hi2c, &s_ram[reg], (uint16_t)tx_len, I2C_LAST_FRAME);
-    if (st != HAL_OK) {
-        schedule_recovery(I2C_RECOVERY_REASON_MALFORMED);
-    }
+    s_recovery_pending = 1U;
 }
 
 static uint8_t packet_reg_for_type(I2cPacketType_t type)
@@ -593,26 +162,6 @@ static uint8_t packet_len_for_type(I2cPacketType_t type, size_t requested_len)
     default: break;
     }
     return (uint8_t)((contract_len > 0xFFU) ? 0xFFU : contract_len);
-}
-
-static uint8_t legacy_read_len_for_register(uint8_t reg)
-{
-    if (reg == I2C_PACKET_TYPE_ADDR) {
-        return 1U;
-    }
-    if ((s_outbox_busy != 0U) && (reg == s_outbox_reg) && (s_outbox_len > 0U)) {
-        return s_outbox_len;
-    }
-    switch (reg) {
-    case I2C_REG_532_ADDR:         return I2C_PACKET_UID_532_LEN;
-    case I2C_REG_MATRIX_PIN_ADDR:  return I2C_PACKET_PIN_LEN;
-    case I2C_REG_WIEGAND_ADDR:     return I2C_PACKET_WIEGAND_LEN;
-    case I2C_REG_HMI_PIN_ADDR:     return I2C_PACKET_PIN_HMI_LEN;
-    case I2C_REG_HW_TIME_ADDR:     return I2C_PACKET_TIME_LEN;
-    case I2C_REG_QR_GM810_ADDR:    return I2C_PACKET_QR_GM810_LEN;
-    case I2C_REG_STM32_ERROR_ADDR: return 16U;
-    default:                       return 1U;
-    }
 }
 
 static uint8_t strict_rx_len_for_register(uint8_t base)
@@ -658,7 +207,6 @@ static void force_idle_event_line(void)
 {
     HAL_GPIO_WritePin(PIN_EVENT_TO_ESP_GPIO_Port, PIN_EVENT_TO_ESP_Pin, GPIO_PIN_SET);
     s_event_latched = 0U;
-    s_event_low_since_tick = tick_now();
 }
 
 static void reset_fsm_state(void)
@@ -673,7 +221,6 @@ static void reset_fsm_state(void)
 static void outbox_complete_ack(void)
 {
     s_outbox_busy = 0U;
-    s_outbox_busy_since_tick = tick_now();
     s_outbox_type = PACKET_NULL;
     s_outbox_reg  = I2C_PACKET_TYPE_ADDR;
     s_outbox_len  = 0U;
@@ -693,12 +240,6 @@ static void restart_listen_if_needed(void)
 {
     if (HAL_I2C_GetState(&hi2c1) != HAL_I2C_STATE_LISTEN) {
         reset_fsm_state();
-        /* Explicitly re-arm ACK on the I2C peripheral before re-entering
-         * listen mode. HAL_I2C_EnableListen_IT() also sets this bit, but
-         * `unexpected_read_fast_nack()` clears CR1.ACK directly without
-         * going through HAL; this dup is a cheap insurance that the next
-         * address match is ACKed even if some HAL path skipped the SET. */
-        SET_BIT(I2C1->CR1, I2C_CR1_ACK);
         if (HAL_I2C_EnableListen_IT(&hi2c1) == HAL_OK) {
             s_diag.relisten_count++;
             note_recovery_duration();
@@ -715,7 +256,6 @@ static void hard_recover_bus(void)
 {
     recover_after_error();
     s_diag.hard_recover_count++;
-    s_noinit_recovery.hard_recover_count++;
     s_recovery_started_tick = tick_now();
     HAL_I2C_DeInit(&hi2c1);
     osDelay(I2C_SLAVE_RECOVERY_COOLDOWN_MS);
@@ -724,17 +264,6 @@ static void hard_recover_bus(void)
         return;
     }
     reset_fsm_state();
-    /* Clear all ISR-level guard counters so the first transaction after the
-     * peripheral reset gets a clean slate. Otherwise a stale saturated value
-     * (in particular `s_i2c1_unexpected_read_consecutive == LIMIT`) would
-     * immediately re-trigger the same escalation on the very next unexpected
-     * read and turn a one-off desync into a permanent HdRcv-storm that
-     * starves master→write traffic. */
-    s_i2c1_unexpected_read_consecutive = 0U;
-    s_i2c1_ev_irq_entries_since_tick = 0U;
-    s_i2c1_ev_irq_last_seen_tick = HAL_GetTick();
-    s_i2c1_ev_txe_tra_busy_spin_count = 0U;
-    SET_BIT(I2C1->CR1, I2C_CR1_ACK);
     if (HAL_I2C_EnableListen_IT(&hi2c1) == HAL_OK) {
         s_diag.relisten_count++;
         note_recovery_duration();
@@ -743,37 +272,11 @@ static void hard_recover_bus(void)
     }
 }
 
-static void full_service_reinit(void)
-{
-    if (myQueueToMasterHandle != NULL) {
-        xQueueReset((QueueHandle_t)myQueueToMasterHandle);
-    }
-    if (myQueueHmiMsgHandle != NULL) {
-        xQueueReset((QueueHandle_t)myQueueHmiMsgHandle);
-    }
-    if (myQueueHMIRecvRawHandle != NULL) {
-        xQueueReset((QueueHandle_t)myQueueHMIRecvRawHandle);
-    }
-    s_deferred_action = DEFERRED_NONE;
-    recover_after_error();
-    s_diag.full_reinit_count++;
-    s_noinit_recovery.full_reinit_count++;
-}
-
-static void schedule_recovery(i2c_recovery_reason_t reason)
-{
-    if (s_recovery_pending == 0U || s_recovery_reason == I2C_RECOVERY_REASON_NONE) {
-        s_recovery_reason = (uint8_t)reason;
-    }
-    s_diag.last_recovery_reason = s_recovery_reason;
-    s_recovery_started_tick = tick_now();
-    s_recovery_pending = 1U;
-}
-
 static void schedule_abort_recovery(void)
 {
     s_diag.abort_count++;
-    schedule_recovery(I2C_RECOVERY_REASON_ABORT);
+    s_recovery_started_tick = tick_now();
+    s_recovery_pending = 1U;
 }
 
 static void poll_bus_health(void)
@@ -781,64 +284,16 @@ static void poll_bus_health(void)
     uint32_t now = tick_now();
     uint8_t scl_low = i2c1_line_is_low(GPIO_PIN_6);
     uint8_t sda_low = i2c1_line_is_low(GPIO_PIN_7);
-    UBaseType_t queue_depth = 0U;
-    UBaseType_t touch_depth = 0U;
+    HAL_I2C_StateTypeDef state = HAL_I2C_GetState(&hi2c1);
 
     if (tick_expired(now, s_phase_deadline_tick)) {
         s_diag.progress_timeout_count++;
-        schedule_recovery(I2C_RECOVERY_REASON_PHASE_TIMEOUT);
+        schedule_abort_recovery();
         clear_progress_watchdog();
         return;
     }
 
-    if ((s_outbox_busy != 0U) && tick_expired(now, s_outbox_busy_since_tick + I2C_SLAVE_OUTBOX_TIMEOUT_MS)) {
-        s_diag.outbox_timeout_count++;
-        s_noinit_recovery.outbox_timeout_count++;
-#if APP_BRINGUP_NO_RESET
-        outbox_complete_ack();
-        return;
-#else
-        schedule_recovery(I2C_RECOVERY_REASON_OUTBOX_TIMEOUT);
-        return;
-#endif
-    }
-
-    if ((s_event_latched != 0U) && tick_expired(now, s_event_low_since_tick + I2C_SLAVE_EVENT_LOW_TIMEOUT_MS)) {
-        s_diag.event_low_timeout_count++;
-#if APP_BRINGUP_NO_RESET
-        force_idle_event_line();
-        return;
-#else
-        schedule_recovery(I2C_RECOVERY_REASON_EVENT_LOW_TIMEOUT);
-        return;
-#endif
-    }
-
-    queue_depth = uxQueueMessagesWaiting((QueueHandle_t)myQueueToMasterHandle);
-    if ((queue_depth > 0U) && tick_expired(now, s_last_master_queue_activity_tick + I2C_SLAVE_QUEUE_STALL_TIMEOUT_MS)) {
-        s_diag.queue_stall_count++;
-        s_noinit_recovery.queue_stall_count++;
-        schedule_recovery(I2C_RECOVERY_REASON_MASTER_QUEUE_STALL);
-        return;
-    }
-
-    if ((s_dwin_watchdog_armed != 0U) && tick_expired(now, s_last_dwin_activity_tick + I2C_SLAVE_DWIN_STALL_TIMEOUT_MS)) {
-        s_diag.dwin_stall_count++;
-        schedule_recovery(I2C_RECOVERY_REASON_DWIN_STALL);
-        return;
-    }
-
-    if (s_touch_watchdog_armed != 0U) {
-        touch_depth = uxQueueMessagesWaiting((QueueHandle_t)myQueueHMIRecvRawHandle);
-    }
-    if ((touch_depth > 0U)
-            && tick_expired(now, s_last_touch_activity_tick + I2C_SLAVE_TOUCH_STALL_TIMEOUT_MS)) {
-        s_diag.touch_stall_count++;
-        schedule_recovery(I2C_RECOVERY_REASON_TOUCH_STALL);
-        return;
-    }
-
-    if (tick_expired(now, s_last_progress_tick + I2C_SLAVE_IDLE_STUCK_TIMEOUT_MS)) {
+    if (((state & 0xFFU) == HAL_I2C_STATE_LISTEN) && tick_expired(now, s_last_progress_tick + I2C_SLAVE_IDLE_STUCK_TIMEOUT_MS)) {
         if (scl_low != 0U) {
             if (s_idle_scl_low_polls == 0U) {
                 s_idle_scl_low_since_tick = now;
@@ -865,27 +320,18 @@ static void poll_bus_health(void)
 
         if ((s_idle_scl_low_polls >= I2C_SLAVE_STUCK_CONFIRM_POLLS)
          && tick_expired(now, s_idle_scl_low_since_tick + I2C_SLAVE_STUCK_CONFIRM_MS)) {
-            if (stuck_line_report_due(now, &s_last_stuck_scl_report_tick) != 0U) {
-                uint32_t sr1 = I2C1->SR1;
-                s_diag.stuck_scl_count++;
-                persist_event_reason(I2C_RECOVERY_REASON_STUCK_SCL);
-                persist_i2c1_snapshot(sr1, ((sr1 & I2C_SR1_ADDR) == 0U) ? I2C1->SR2 : 0U, I2C1->CR2);
-            }
-            /* A low SCL line can be held externally by the master/board.
-             * Reporting it is useful, but hard recovery/reset here creates
-             * the observed SclSt -> RST loop while the physical condition
-             * remains present. */
+            s_diag.stuck_scl_count++;
+            s_idle_scl_low_polls = 0U;
+            s_idle_scl_low_since_tick = 0U;
+            schedule_abort_recovery();
             return;
         }
         if ((s_idle_sda_low_polls >= I2C_SLAVE_STUCK_CONFIRM_POLLS)
          && tick_expired(now, s_idle_sda_low_since_tick + I2C_SLAVE_STUCK_CONFIRM_MS)) {
-            if (stuck_line_report_due(now, &s_last_stuck_sda_report_tick) != 0U) {
-                uint32_t sr1 = I2C1->SR1;
-                s_diag.stuck_sda_count++;
-                persist_event_reason(I2C_RECOVERY_REASON_STUCK_SDA);
-                persist_i2c1_snapshot(sr1, ((sr1 & I2C_SR1_ADDR) == 0U) ? I2C1->SR2 : 0U, I2C1->CR2);
-            }
-            return;
+            s_diag.stuck_sda_count++;
+            s_idle_sda_low_polls = 0U;
+            s_idle_sda_low_since_tick = 0U;
+            schedule_abort_recovery();
         }
         return;
     }
@@ -897,114 +343,22 @@ static void poll_bus_health(void)
 }
 static void execute_pending_recovery(void)
 {
-    i2c_recovery_reason_t reason;
-
     if (s_recovery_pending == 0U) {
         return;
     }
 
     s_recovery_pending = 0U;
-    reason = (i2c_recovery_reason_t)s_recovery_reason;
-    s_recovery_reason = I2C_RECOVERY_REASON_NONE;
-    s_diag.last_recovery_reason = (uint32_t)reason;
-
-    if ((reason == I2C_RECOVERY_REASON_STUCK_SCL) || (reason == I2C_RECOVERY_REASON_STUCK_SDA)) {
-        reset_fsm_state();
-        note_recovery_duration();
-        return;
-    }
-
-    /* Reasons surfaced by the ISR-level guard or the controlled-reset path
-     * mean the peripheral was either disabled (PE cleared, NVIC IRQs masked)
-     * by emergency_system_reset_from_isr() or is in a state where re-arming
-     * LISTEN alone is not sufficient. Always go through hard_recover_bus()
-     * so HAL_I2C_DeInit/Init runs and HAL_I2C_MspInit re-enables NVIC. */
-    if ((reason == I2C_RECOVERY_REASON_I2C1_ISR_TXE_TRA_BUSY_SPIN)
-     || (reason == I2C_RECOVERY_REASON_I2C1_ISR_STARVATION)
-     || (reason == I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_RESET)) {
-        hard_recover_bus();
-        return;
-    }
-
-#if APP_BRINGUP_NO_RESET
-    recover_after_error();
-    restart_listen_if_needed();
-    return;
-#else
-    s_recovery_attempts++;
-
-    if (s_recovery_attempts > I2C_SLAVE_FULL_RECOVERY_LIMIT) {
-        s_diag.system_reset_count++;
-        s_noinit_recovery.system_reset_count++;
-        persist_reset_reason(reason);
-        app_i2c_slave_sync_diag_to_ram();
-        osDelay(I2C_SLAVE_PRE_RESET_DELAY_MS);
-        NVIC_SystemReset();
-        return;
-    }
-
-    if (s_recovery_attempts > I2C_SLAVE_SOFT_RECOVERY_LIMIT) {
-        full_service_reinit();
-    }
-
     /* HAL_I2C_Slave_Abort_IT is not available on F4 HAL, falling back to hard reset */
     hard_recover_bus();
-#endif
 }
 
 /* ---- public API --------------------------------------------------------- */
 void app_i2c_slave_init(void)
 {
-    uint32_t now = tick_now();
-    init_noinit_diag();
-#if APP_BRINGUP_NO_RESET
-    s_noinit_recovery.last_reset_reason = 0U;
-    s_noinit_recovery.system_reset_count = 0U;
-#endif
     memset(s_ram, 0, sizeof(s_ram));
     memset(&s_diag, 0, sizeof(s_diag));
     recover_after_error();
     reset_fsm_state();
-    s_recovery_reason = I2C_RECOVERY_REASON_NONE;
-    s_recovery_attempts = 0U;
-    s_outbox_busy_since_tick = now;
-    s_event_low_since_tick = now;
-    s_last_master_queue_activity_tick = now;
-    s_last_dwin_activity_tick = now;
-    s_last_touch_activity_tick = now;
-    s_dwin_watchdog_armed = 0U;
-    s_touch_watchdog_armed = 0U;
-    s_i2c_guard_heartbeat_tick = now;
-    s_i2c1_ev_txe_tra_busy_spin_count = 0U;
-    s_i2c1_ev_irq_entries_since_tick = 0U;
-    s_i2c1_ev_irq_last_seen_tick = now;
-    s_i2c1_unexpected_read_consecutive = 0U;
-    s_i2c_dummy_tx_active = 0U;
-    s_legacy_last_offset = I2C_PACKET_TYPE_ADDR;
-    s_last_stuck_scl_report_tick = 0U;
-    s_last_stuck_sda_report_tick = 0U;
-    s_diag.outbox_timeout_count = s_noinit_recovery.outbox_timeout_count;
-    s_diag.queue_stall_count = s_noinit_recovery.queue_stall_count;
-    s_diag.full_reinit_count = s_noinit_recovery.full_reinit_count;
-#if APP_BRINGUP_NO_RESET
-    s_diag.system_reset_count = 0U;
-    s_diag.boot_reset_reason = 0U;
-    s_diag.last_recovery_reason = s_noinit_recovery.last_event_reason;
-#else
-    s_diag.system_reset_count = s_noinit_recovery.system_reset_count;
-    s_diag.boot_reset_reason = s_noinit_recovery.last_reset_reason;
-    s_diag.last_recovery_reason = s_noinit_recovery.last_reset_reason;
-#endif
-    s_diag.hard_recover_count = s_noinit_recovery.hard_recover_count;
-    s_diag.boot_count = s_noinit_recovery.boot_count;
-    s_diag.last_event_reason = s_noinit_recovery.last_event_reason;
-    s_diag.i2c1_isr_txe_tra_busy_count = s_noinit_recovery.i2c1_isr_txe_tra_busy_count;
-    s_diag.i2c1_unexpected_read_count = s_noinit_recovery.i2c1_unexpected_read_count;
-    s_diag.iwdg_supervisor_timeout_count = s_noinit_recovery.iwdg_supervisor_timeout_count;
-    s_diag.last_i2c1_sr1 = s_noinit_recovery.last_i2c1_sr1;
-    s_diag.last_i2c1_sr2 = s_noinit_recovery.last_i2c1_sr2;
-    s_diag.last_i2c1_cr2 = s_noinit_recovery.last_i2c1_cr2;
-    s_diag.last_gpiob_idr = s_noinit_recovery.last_gpiob_idr;
     /* Do NOT set an aggressive deadline here — guard task is already running.
      * Progress watchdog activates on first real I2C addr_callback. */
     clear_progress_watchdog();
@@ -1038,14 +392,10 @@ void app_i2c_slave_poll_recovery(void)
 
 void app_i2c_slave_note_dwin_activity(void)
 {
-    s_last_dwin_activity_tick = tick_now();
-    s_dwin_watchdog_armed = 1U;
 }
 
 void app_i2c_slave_note_touch_activity(void)
 {
-    s_last_touch_activity_tick = tick_now();
-    s_touch_watchdog_armed = 1U;
 }
 
 /* ---- diag export to I2C RAM 0xF0..0xFF --------------------------------- */
@@ -1064,7 +414,7 @@ void app_i2c_slave_note_touch_activity(void)
  *   [12] HAL I2C1 state
  *   [13] SCL pin level
  *   [14] SDA pin level
- *   [15] last_recovery_reason (low byte)
+ *   [15] reserved (0)
  */
 static uint8_t sat8(uint32_t v) { return (v > 255U) ? 255U : (uint8_t)v; }
 
@@ -1088,7 +438,7 @@ void app_i2c_slave_sync_diag_to_ram(void)
     base[12] = (uint8_t)(HAL_I2C_GetState(&hi2c1) & 0xFFU);
     base[13] = (uint8_t)HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_6);
     base[14] = (uint8_t)HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_7);
-    base[15] = (uint8_t)(s_diag.last_recovery_reason & 0xFFU);
+    base[15] = 0U;
 }
 
 uint8_t app_i2c_slave_has_errors(void)
@@ -1096,53 +446,9 @@ uint8_t app_i2c_slave_has_errors(void)
     return (s_diag.progress_timeout_count
           + s_diag.stuck_scl_count
           + s_diag.stuck_sda_count
-          + s_diag.outbox_timeout_count
-          + s_diag.event_low_timeout_count
-          + s_diag.queue_stall_count
-          + s_diag.dwin_stall_count
-          + s_diag.touch_stall_count
           + s_diag.hard_recover_count
-          + s_diag.full_reinit_count
-          + s_diag.system_reset_count
           + s_diag.malformed_count
-          + s_diag.recover_fail_count
-          + s_diag.i2c1_isr_txe_tra_busy_count
-          + s_diag.i2c1_unexpected_read_count
-          + s_diag.iwdg_supervisor_timeout_count) > 0U ? 1U : 0U;
-}
-
-void app_i2c_slave_i2c1_ev_irq_guard_before_hal(void)
-{
-    i2c1_ev_irq_guard_sample();
-}
-
-void app_i2c_slave_i2c1_ev_irq_guard_after_hal(void)
-{
-    i2c1_ev_irq_guard_sample();
-}
-
-void app_i2c_slave_note_iwdg_supervisor_timeout(void)
-{
-    uint32_t sr1 = I2C1->SR1;
-    uint32_t sr2 = ((sr1 & I2C_SR1_ADDR) == 0U) ? I2C1->SR2 : 0U;
-    uint32_t cr2 = I2C1->CR2;
-
-    ensure_noinit_diag_from_isr();
-    s_noinit_recovery.system_reset_count++;
-    s_noinit_recovery.iwdg_supervisor_timeout_count++;
-    s_noinit_recovery.last_reset_reason = (uint32_t)I2C_RECOVERY_REASON_IWDG_SUPERVISOR_TIMEOUT;
-    persist_i2c1_snapshot(sr1, sr2, cr2);
-    s_diag.iwdg_supervisor_timeout_count = s_noinit_recovery.iwdg_supervisor_timeout_count;
-    s_diag.last_recovery_reason = (uint32_t)I2C_RECOVERY_REASON_IWDG_SUPERVISOR_TIMEOUT;
-}
-
-uint8_t app_i2c_slave_watchdog_can_refresh(uint32_t max_i2c_guard_stale_ms)
-{
-    uint32_t now = tick_now();
-    if (s_i2c_guard_heartbeat_tick == 0U) {
-        return 1U;
-    }
-    return ((now - s_i2c_guard_heartbeat_tick) <= max_i2c_guard_stale_ms) ? 1U : 0U;
+          + s_diag.recover_fail_count) > 0U ? 1U : 0U;
 }
 
 /* ---- HMI diag line formatting (10 chars max) ---------------------------- */
@@ -1174,8 +480,8 @@ void StartTaskI2cGuard(void const *argument)
 {
     (void)argument;
     for (;;) {
-        s_i2c_guard_heartbeat_tick = tick_now();
         app_i2c_slave_poll_recovery();
+        process_deferred_actions();
         app_i2c_slave_sync_diag_to_ram();
         osDelay(5);
     }
@@ -1221,6 +527,12 @@ static void process_auth_result_write(void)
         /* AUTH_RESULT_BUSY and any unknown future values are accepted with no side effects. */
     }
 }
+
+/* ---- Deferred processing flags (ISR sets, task processes) -------------- */
+#define DEFERRED_NONE           0x00U
+#define DEFERRED_TIME_SYNC      0x01U
+#define DEFERRED_AUTH_RESULT    0x02U
+static volatile uint8_t s_deferred_action = DEFERRED_NONE;
 
 static void process_register_write_from_isr(uint8_t base, BaseType_t *prior)
 {
@@ -1269,7 +581,6 @@ void app_i2c_slave_publish(const I2cPacketToMaster_t *pckt)
 {
     uint8_t target_reg;
     uint8_t target_len;
-    uint32_t now = tick_now();
 
     if (pckt == NULL) {
         return;
@@ -1278,7 +589,6 @@ void app_i2c_slave_publish(const I2cPacketToMaster_t *pckt)
     target_reg = packet_reg_for_type(pckt->type);
     target_len = packet_len_for_type(pckt->type, pckt->len);
 
-    taskENTER_CRITICAL();
     s_ram[I2C_PACKET_TYPE_ADDR] = (uint8_t)pckt->type;
     if ((target_len > 0U) && (pckt->payload != NULL)) {
         memset(&s_ram[target_reg], 0, target_len);
@@ -1289,45 +599,28 @@ void app_i2c_slave_publish(const I2cPacketToMaster_t *pckt)
     s_outbox_type = (uint8_t)pckt->type;
     s_outbox_reg  = target_reg;
     s_outbox_len  = target_len;
-    s_outbox_busy_since_tick = now;
     s_last_tx_reg = 0xFFU;
     s_last_tx_len = 0U;
-    s_event_latched = 1U;
-    s_event_low_since_tick = now;
-    taskEXIT_CRITICAL();
     HAL_GPIO_WritePin(PIN_EVENT_TO_ESP_GPIO_Port, PIN_EVENT_TO_ESP_Pin, GPIO_PIN_RESET);
+    s_event_latched = 1U;
 }
 
 void StartTaskRxTxI2c1(void const *argument)
 {
     I2cPacketToMaster_t pckt;
     const char *bus_error_msg = "BUS ERROR       ";  /* padded to 16 chars for VP 0x5200 */
-#if !APP_BRINGUP_NO_RESET
-    char reset_reason_msg[17];
-#endif
     (void)argument;
 
     app_i2c_slave_poll_recovery();
     if (HAL_I2C_EnableListen_IT(&hi2c1) != HAL_OK) {
-        schedule_recovery(I2C_RECOVERY_REASON_ABORT);
+        Error_Handler();
     }
     s_diag.relisten_count++;
-#if !APP_BRINGUP_NO_RESET
-    if (s_diag.boot_reset_reason != 0U) {
-        snprintf(reset_reason_msg, sizeof(reset_reason_msg), "RST RSN:%04lu  ",
-                 (unsigned long)s_diag.boot_reset_reason);
-        dwin_text_output(DWIN_STATUS_VP_ADDR, (const uint8_t*)reset_reason_msg, strlen(reset_reason_msg));
-    }
-#endif
 
     for (;;) {
         uint16_t count = 0U;
         HAL_I2C_StateTypeDef i2c1_state;
-        process_deferred_actions();
-        if (xQueueReceive(myQueueToMasterHandle, &pckt, I2C_SLAVE_RXTX_IDLE_POLL_MS) != pdTRUE) {
-            continue;
-        }
-        s_last_master_queue_activity_tick = tick_now();
+        xQueueReceive(myQueueToMasterHandle, &pckt, osWaitForever);
 
         /* Release the TIME-packet coalesce slot as soon as the entry is
          * dequeued so that the next 1Hz tick can re-arm immediately. */
@@ -1348,17 +641,12 @@ void StartTaskRxTxI2c1(void const *argument)
             i2c1_state = HAL_I2C_GetState(&hi2c1);
             count++;
             if (count > 20U) {
-                restart_listen_if_needed();
-                i2c1_state = HAL_I2C_GetState(&hi2c1);
+                dwin_text_output(0x5200, (const uint8_t*)bus_error_msg, strlen(bus_error_msg));
                 count = 0U;
-                break;
+                hard_recover_bus();
             }
             osDelay(10);
         } while ((i2c1_state & 0xFFU) != HAL_I2C_STATE_LISTEN);
-
-        if ((i2c1_state & 0xFFU) != HAL_I2C_STATE_LISTEN) {
-            continue;
-        }
 
         while (s_outbox_busy != 0U) {
             app_i2c_slave_poll_recovery();
@@ -1389,7 +677,6 @@ void app_i2c_slave_listen_complete(I2C_HandleTypeDef *hi2c)
 {
     if (hi2c != &hi2c1) return;
 
-    s_i2c_dummy_tx_active = 0U;
     reset_fsm_state();
     if (HAL_I2C_EnableListen_IT(hi2c) == HAL_OK) {
         s_diag.relisten_count++;
@@ -1409,7 +696,6 @@ void app_i2c_slave_addr_callback(I2C_HandleTypeDef *hi2c, uint8_t Direction, uin
     note_progress(I2C_SLAVE_HEADER_TIMEOUT_MS);
 
     if (Direction == I2C_DIRECTION_TRANSMIT) {
-        s_i2c1_unexpected_read_consecutive = 0U;
         reset_fsm_state();
         note_progress(I2C_SLAVE_HEADER_TIMEOUT_MS);
         HAL_I2C_Slave_Seq_Receive_IT(hi2c, &s_i2c_sec_ctrl_h.offset, 1, I2C_FIRST_FRAME);
@@ -1419,42 +705,13 @@ void app_i2c_slave_addr_callback(I2C_HandleTypeDef *hi2c, uint8_t Direction, uin
          && (s_i2c_sec_ctrl_h.second == 0U)
          && (s_i2c_sec_ctrl_h.final == 1U)
          && (validate_read_request(s_i2c_sec_ctrl_h.offset, s_i2c_sec_ctrl_h.rx_count) != 0U)) {
-            s_i2c1_unexpected_read_consecutive = 0U;
             s_i2c_sec_ctrl_h.tx_count = s_i2c_sec_ctrl_h.rx_count;
             s_last_tx_reg = s_i2c_sec_ctrl_h.offset;
             s_last_tx_len = s_i2c_sec_ctrl_h.tx_count;
             note_progress(I2C_SLAVE_PAYLOAD_TIMEOUT_MS);
             HAL_I2C_Slave_Seq_Transmit_IT(hi2c, &s_ram[s_i2c_sec_ctrl_h.offset], (uint16_t)s_i2c_sec_ctrl_h.tx_count, I2C_LAST_FRAME);
-        } else if ((s_i2c_sec_ctrl_h.first == 0U)
-                && (s_i2c_sec_ctrl_h.second == 1U)
-                && (is_known_register(s_i2c_sec_ctrl_h.offset) != 0U)) {
-            uint8_t tx_len = legacy_read_len_for_register(s_i2c_sec_ctrl_h.offset);
-            if ((uint16_t)s_i2c_sec_ctrl_h.offset + (uint16_t)tx_len > sizeof(s_ram)) {
-                tx_len = (uint8_t)(sizeof(s_ram) - (uint16_t)s_i2c_sec_ctrl_h.offset);
-            }
-            s_i2c1_unexpected_read_consecutive = 0U;
-            s_i2c_sec_ctrl_h.second = 0U;
-            s_i2c_sec_ctrl_h.final = 1U;
-            s_i2c_sec_ctrl_h.rx_count = tx_len;
-            s_i2c_sec_ctrl_h.tx_count = tx_len;
-            s_last_tx_reg = s_i2c_sec_ctrl_h.offset;
-            s_last_tx_len = tx_len;
-            note_progress(I2C_SLAVE_PAYLOAD_TIMEOUT_MS);
-            HAL_I2C_Slave_Seq_Transmit_IT(hi2c, &s_ram[s_i2c_sec_ctrl_h.offset], (uint16_t)tx_len, I2C_LAST_FRAME);
         } else {
-            /* Tier 1: fast NACK/abort — synchronously preload DR + clear ACK
-             * so the master sees end-of-frame after a single fail-safe byte.
-             * This guarantees TXE is cleared before this ISR exits, breaking
-             * any potential TXE/TRA/BUSY spin at its source.
-             *
-             * Tier 2: if HAL is already past pure-listen state, fall back to
-             * the heavier dummy-TX path (unexpected_read_dummy_or_reset),
-             * which uses HAL_I2C_Slave_Seq_Transmit_IT to publish dummy
-             * bytes and (after I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT)
-             * schedules a controlled peripheral reset. */
-            if (unexpected_read_fast_nack(hi2c) == 0U) {
-                unexpected_read_dummy_or_reset(hi2c);
-            }
+            mark_malformed_and_recover();
         }
     }
 }
@@ -1477,7 +734,6 @@ void app_i2c_slave_rx_complete(I2C_HandleTypeDef *hi2c)
             mark_malformed_and_recover();
             return;
         }
-        s_legacy_last_offset = s_i2c_sec_ctrl_h.offset;
         HAL_I2C_Slave_Seq_Receive_IT(hi2c, &s_i2c_sec_ctrl_h.rx_count, 1, I2C_NEXT_FRAME);
         s_i2c_test.rcv_start++;
         return;
@@ -1521,7 +777,6 @@ void app_i2c_slave_rx_complete(I2C_HandleTypeDef *hi2c)
 void app_i2c_slave_tx_complete(I2C_HandleTypeDef *hi2c)
 {
     if (hi2c != &hi2c1) return;
-    s_i2c_dummy_tx_active = 0U;
     s_i2c_sec_ctrl_h.final = 0U;
     clear_progress_watchdog();
     if ((s_outbox_busy != 0U) && (s_last_tx_reg == s_outbox_reg) && (s_last_tx_len >= s_outbox_len)) {
@@ -1538,12 +793,6 @@ void app_i2c_slave_error(I2C_HandleTypeDef *hi2c)
     errorcode = HAL_I2C_GetError(hi2c);
 
     if (errorcode == HAL_I2C_ERROR_AF) {
-        if (s_i2c_dummy_tx_active != 0U) {
-            s_i2c_dummy_tx_active = 0U;
-            clear_progress_watchdog();
-            restart_listen_if_needed();
-            return;
-        }
         if ((s_last_tx_reg != 0xFFU) && (s_last_tx_len > 0U) && (s_i2c_sec_ctrl_h.final != 0U)) {
             s_i2c_sec_ctrl_h.final = 0U;
             clear_progress_watchdog();
