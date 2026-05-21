@@ -55,10 +55,22 @@ extern osTimerId myTimerBuzzerOffHandle;
  * 400 kHz fast-mode: each TXE/TRA/BUSY re-entry is on the order of a few µs,
  * 64 re-entries ≈ a few hundred µs of CPU starvation before recovery. */
 #define I2C1_ISR_TXE_TRA_BUSY_SPIN_LIMIT 64U
+/* Signature-independent ISR-storm guard: count I2C1_EV_IRQHandler entries while
+ * HAL_GetTick() (driven by SysTick) does not advance. If SysTick is starved,
+ * PendSV cannot run and the supervisor task can never recover — regardless of
+ * which SR1/SR2 signature the peripheral is in (slave-receiver vs transmitter,
+ * ADDR-NACK storm, AF storm, etc). Triggers within a fraction of a millisecond
+ * before the bus has any chance to stay stuck. */
+#define I2C1_ISR_STARVATION_ENTRIES_LIMIT 128U
 #define I2C1_UNEXPECTED_READ_RESET_LIMIT 16U
 /* Beyond this many consecutive unexpected reads, stop serving dummy bytes and
- * escalate to a controlled I2C1 peripheral reset via schedule_recovery(). */
-#define I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT 64U
+ * escalate to a controlled I2C1 peripheral reset via schedule_recovery().
+ * Tightened from 64 → 8 after the post-PR#23 lock-up observed in
+ * bak/STM32F411.txt: at 400 kHz fast-mode an ESP32 master can retry tens of
+ * unexpected reads per ms, so the previous 64-entry budget allowed enough
+ * back-to-back I2C1_EV_IRQHandler re-entries to starve PendSV before the
+ * controlled reset could fire. */
+#define I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT 8U
 #define DWIN_STATUS_VP_ADDR              0x5200U
 
 /* ---- Deferred processing flags (ISR sets, task processes) -------------- */
@@ -83,6 +95,7 @@ typedef enum {
     I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_DUMMY_TX = 13U,
     I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_RESET = 14U,
     I2C_RECOVERY_REASON_IWDG_SUPERVISOR_TIMEOUT = 15U,
+    I2C_RECOVERY_REASON_I2C1_ISR_STARVATION = 16U,
 } i2c_recovery_reason_t;
 
 typedef struct {
@@ -155,6 +168,8 @@ static volatile uint8_t s_touch_watchdog_armed = 0U;
 static volatile uint8_t s_deferred_action = DEFERRED_NONE;
 static volatile uint32_t s_i2c_guard_heartbeat_tick = 0U;
 static volatile uint16_t s_i2c1_ev_txe_tra_busy_spin_count = 0U;
+static volatile uint16_t s_i2c1_ev_irq_entries_since_tick = 0U;
+static volatile uint32_t s_i2c1_ev_irq_last_seen_tick = 0U;
 static volatile uint8_t s_i2c1_unexpected_read_consecutive = 0U;
 static volatile uint8_t s_i2c_dummy_tx_active = 0U;
 static volatile uint8_t s_legacy_last_offset = I2C_PACKET_TYPE_ADDR;
@@ -235,6 +250,11 @@ static void emergency_system_reset_from_isr(i2c_recovery_reason_t reason, uint32
 #if APP_BRINGUP_NO_RESET
     if (reason == I2C_RECOVERY_REASON_I2C1_ISR_TXE_TRA_BUSY_SPIN) {
         s_noinit_recovery.i2c1_isr_txe_tra_busy_count++;
+    } else if (reason == I2C_RECOVERY_REASON_I2C1_ISR_STARVATION) {
+        /* Reuse the ISR-livelock counter — both signal "ISR-level livelock";
+         * the distinguishing detail is preserved in last_event_reason and the
+         * sr1/sr2/cr2 snapshot below. */
+        s_noinit_recovery.i2c1_isr_txe_tra_busy_count++;
     } else if (reason == I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_RESET) {
         s_noinit_recovery.i2c1_unexpected_read_count++;
     } else if (reason == I2C_RECOVERY_REASON_IWDG_SUPERVISOR_TIMEOUT) {
@@ -261,6 +281,8 @@ static void emergency_system_reset_from_isr(i2c_recovery_reason_t reason, uint32
 #else
     s_noinit_recovery.system_reset_count++;
     if (reason == I2C_RECOVERY_REASON_I2C1_ISR_TXE_TRA_BUSY_SPIN) {
+        s_noinit_recovery.i2c1_isr_txe_tra_busy_count++;
+    } else if (reason == I2C_RECOVERY_REASON_I2C1_ISR_STARVATION) {
         s_noinit_recovery.i2c1_isr_txe_tra_busy_count++;
     } else if (reason == I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_RESET) {
         s_noinit_recovery.i2c1_unexpected_read_count++;
@@ -308,6 +330,33 @@ static void i2c1_ev_irq_guard_sample(void)
     uint32_t sr1;
     uint32_t sr2;
     uint32_t cr2;
+    uint32_t now_tick = HAL_GetTick();
+
+    /* Signature-independent ISR-storm detector.
+     *
+     * If `HAL_GetTick()` (driven by SysTick) does not advance between two
+     * consecutive entries into I2C1_EV_IRQHandler, SysTick is starved — which
+     * means PendSV is also starved and FreeRTOS cannot run the supervisor
+     * task. After more than I2C1_ISR_STARVATION_ENTRIES_LIMIT such entries
+     * in a row, the bus is effectively dead regardless of the SR1/SR2/CR2
+     * signature, and we must mask the IRQ so the core can finally leave the
+     * vector. This complements (does not replace) the TXE/TRA/BUSY/ITBUFEN
+     * detector below, which only sees the slave-transmitter signature. */
+    if (now_tick != s_i2c1_ev_irq_last_seen_tick) {
+        s_i2c1_ev_irq_last_seen_tick = now_tick;
+        s_i2c1_ev_irq_entries_since_tick = 0U;
+    } else if (s_i2c1_ev_irq_entries_since_tick < 0xFFFFU) {
+        s_i2c1_ev_irq_entries_since_tick++;
+    }
+    if (s_i2c1_ev_irq_entries_since_tick >= I2C1_ISR_STARVATION_ENTRIES_LIMIT) {
+        uint32_t sr1_s = I2C1->SR1;
+        uint32_t sr2_s = ((sr1_s & I2C_SR1_ADDR) == 0U) ? I2C1->SR2 : 0U;
+        uint32_t cr2_s = I2C1->CR2;
+        s_i2c1_ev_irq_entries_since_tick = 0U;
+        emergency_system_reset_from_isr(I2C_RECOVERY_REASON_I2C1_ISR_STARVATION,
+                                        sr1_s, sr2_s, cr2_s);
+        return;
+    }
 
     if (i2c1_is_txe_tra_busy_stretch(&sr1, &sr2, &cr2) == 0U) {
         s_i2c1_ev_txe_tra_busy_spin_count = 0U;
@@ -428,6 +477,21 @@ static uint8_t unexpected_read_fast_nack(I2C_HandleTypeDef *hi2c)
     persist_event_reason(I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_DUMMY_TX);
     if (s_i2c1_unexpected_read_consecutive < 0xFFU) {
         s_i2c1_unexpected_read_consecutive++;
+    }
+    /* If the master keeps issuing unexpected reads, the fast-NACK path alone
+     * is not enough — each retry triggers a fresh ADDR-match IRQ and PendSV
+     * can be starved before the heavier `unexpected_read_dummy_or_reset()`
+     * path is ever reached. Escalate to a controlled peripheral reset here
+     * once the consecutive-reads budget is exhausted: this masks the I2C1
+     * NVIC IRQs and lets the supervisor task run hard_recover_bus(). */
+    if (s_i2c1_unexpected_read_consecutive >= I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT) {
+        uint32_t sr1_s = I2C1->SR1;
+        uint32_t sr2_s = ((sr1_s & I2C_SR1_ADDR) == 0U) ? I2C1->SR2 : 0U;
+        uint32_t cr2_s = I2C1->CR2;
+        s_i2c1_unexpected_read_consecutive = I2C1_UNEXPECTED_READ_CONTROLLED_RESET_LIMIT;
+        emergency_system_reset_from_isr(I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_RESET,
+                                        sr1_s, sr2_s, cr2_s);
+        return 1U;
     }
     note_progress(I2C_SLAVE_PAYLOAD_TIMEOUT_MS);
     return 1U;
@@ -829,6 +893,7 @@ static void execute_pending_recovery(void)
      * LISTEN alone is not sufficient. Always go through hard_recover_bus()
      * so HAL_I2C_DeInit/Init runs and HAL_I2C_MspInit re-enables NVIC. */
     if ((reason == I2C_RECOVERY_REASON_I2C1_ISR_TXE_TRA_BUSY_SPIN)
+     || (reason == I2C_RECOVERY_REASON_I2C1_ISR_STARVATION)
      || (reason == I2C_RECOVERY_REASON_I2C1_UNEXPECTED_READ_RESET)) {
         hard_recover_bus();
         return;
@@ -884,6 +949,8 @@ void app_i2c_slave_init(void)
     s_touch_watchdog_armed = 0U;
     s_i2c_guard_heartbeat_tick = now;
     s_i2c1_ev_txe_tra_busy_spin_count = 0U;
+    s_i2c1_ev_irq_entries_since_tick = 0U;
+    s_i2c1_ev_irq_last_seen_tick = now;
     s_i2c1_unexpected_read_consecutive = 0U;
     s_i2c_dummy_tx_active = 0U;
     s_legacy_last_offset = I2C_PACKET_TYPE_ADDR;
