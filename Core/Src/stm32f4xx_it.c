@@ -23,7 +23,6 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "service_gm810_uart.h"
-#include "app_i2c_slave.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,9 +32,6 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#ifndef APP_BRINGUP_NO_RESET
-#define APP_BRINGUP_NO_RESET 1
-#endif
 
 /* USER CODE END PD */
 
@@ -97,9 +93,7 @@ void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
 
-#if !APP_BRINGUP_NO_RESET
 	NVIC_SystemReset();
-#endif
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
@@ -235,18 +229,11 @@ void TIM1_TRG_COM_TIM11_IRQHandler(void)
 void I2C1_EV_IRQHandler(void)
 {
   /* USER CODE BEGIN I2C1_EV_IRQn 0 */
-  /* Detect TXE && TRA && BUSY && ITBUFEN stretch condition before HAL runs:
-   * if the previous run failed to clear it, this guard can mask the IRQ and
-   * trigger recovery before HAL spins inside the same vector again. */
-  app_i2c_slave_i2c1_ev_irq_guard_before_hal();
+
   /* USER CODE END I2C1_EV_IRQn 0 */
   HAL_I2C_EV_IRQHandler(&hi2c1);
   /* USER CODE BEGIN I2C1_EV_IRQn 1 */
-  /* Re-sample after HAL: if HAL returned without writing DR (e.g. application
-   * FSM was not ready), the guard increments the spin counter and, on
-   * threshold, masks the IRQ + clears its pending bit so the core finally
-   * exits the vector and PendSV can run. */
-  app_i2c_slave_i2c1_ev_irq_guard_after_hal();
+
   /* USER CODE END I2C1_EV_IRQn 1 */
 }
 
