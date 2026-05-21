@@ -32,9 +32,6 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#ifndef APP_BRINGUP_NO_RESET
-#define APP_BRINGUP_NO_RESET 1
-#endif
 
 /* USER CODE END PD */
 
@@ -96,9 +93,7 @@ void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
 
-#if !APP_BRINGUP_NO_RESET
 	NVIC_SystemReset();
-#endif
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
