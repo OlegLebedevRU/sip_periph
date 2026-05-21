@@ -425,7 +425,9 @@ void StartTaskHmiMsg(void const *argument) {
 	const uint8_t diag_hw_count = app_i2c_slave_diag_line_count();
 	char diag_buf[HMI_DIAG_TEXT_SIZE];
 	uint8_t was_diag = 0U;           /* previous iteration was diag mode */
+#if HMI_AUTO_DIAG_ON_ERROR
 	uint32_t diag_err_snapshot = 0U; /* last known error sum — rotation starts on change */
+#endif
 	
 	uint8_t was_console = 0U;
 	uint8_t last_console_remain = 0U;
@@ -487,8 +489,10 @@ void StartTaskHmiMsg(void const *argument) {
 				s_diag_oneshot = 0U;
 				s_diag_oneshot_remaining = 0U;
 				diag_index = 0U;
+#if HMI_AUTO_DIAG_ON_ERROR
 				/* Snapshot current sum so rotation doesn't restart immediately */
 				diag_err_snapshot = hmi_diag_error_sum();
+#endif
 				/* Transition diag → clock: clear VP then force immediate clock update */
 				dwin_timer_clear();
 				was_diag = 0U;
@@ -506,7 +510,7 @@ void StartTaskHmiMsg(void const *argument) {
 				want_diag = 1U;
 			}
 #else
-			diag_err_snapshot = err_sum;
+			(void)err_sum;
 #endif
 			if (s_diag_oneshot != 0U && s_diag_oneshot_remaining > 0U) {
 				want_diag = 1U;
@@ -533,8 +537,10 @@ void StartTaskHmiMsg(void const *argument) {
 					diag_index++;
 					if (diag_index >= total_lines) {
 						diag_index = 0U;
+#if HMI_AUTO_DIAG_ON_ERROR
 						/* Update snapshot — if no new errors, rotation stops next cycle */
 						diag_err_snapshot = err_sum;
+#endif
 						/* If oneshot mode, complete the cycle */
 						if (s_diag_oneshot != 0U) {
 							s_diag_oneshot = 0U;
