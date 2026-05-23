@@ -11,6 +11,7 @@
 #define APP_IWDG_SR_PVU            (1UL << 0)
 #define APP_IWDG_SR_RVU            (1UL << 1)
 #define APP_IWDG_READY_TIMEOUT     1000000U
+#define APP_IWDG_MAX_RELOAD        0x0FFFU
 
 #define APP_WATCHDOG_REFRESH_MS        250U  /* Supervisor checks 4x per heartbeat window. */
 #define APP_WATCHDOG_HEARTBEAT_MS      1000U /* Required tasks must report within this window. */
@@ -81,21 +82,23 @@ void app_watchdog_init(void)
         NVIC_SystemReset();
     }
 
+    /* Start first, matching the STM32F4 IWDG programming sequence.  On this
+     * family the IWDG start key also forces the LSI domain used to transfer
+     * PR/RLR; programming before start can leave PVU/RVU set and wedge boot. */
+    IWDG->KR = APP_IWDG_KR_START;
     IWDG->KR = APP_IWDG_KR_ENABLE_WRITE;
-    if (iwdg_wait_ready() == 0U) {
-        app_watchdog_record_fault(APP_WATCHDOG_REASON_ERROR_HANDLER);
-        NVIC_SystemReset();
-    }
-
     IWDG->PR = APP_IWDG_PRESCALER_DIV32;
     IWDG->RLR = APP_IWDG_RELOAD_2S;
     if (iwdg_wait_ready() == 0U) {
         app_watchdog_record_fault(APP_WATCHDOG_REASON_ERROR_HANDLER);
-        NVIC_SystemReset();
+        /* If the transfer is unexpectedly slow, avoid a software-reset loop.
+         * Keep the already-started IWDG alive with the current reload value so
+         * the supervisor task can take over instead of leaving the board dead. */
+        IWDG->KR = APP_IWDG_KR_ENABLE_WRITE;
+        IWDG->RLR = APP_IWDG_MAX_RELOAD;
     }
 
     iwdg_refresh();
-    IWDG->KR = APP_IWDG_KR_START;
     s_started = 1U;
 }
 
