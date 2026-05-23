@@ -19,6 +19,7 @@
 #include "service_time_sync.h"
 #include "service_runtime_config.h"
 #include "service_relay_actuator.h"
+#include "app_watchdog.h"
 
 /* ---- externs from main.c ------------------------------------------------ */
 extern I2C_HandleTypeDef hi2c1;
@@ -480,6 +481,7 @@ void StartTaskI2cGuard(void const *argument)
 {
     (void)argument;
     for (;;) {
+        app_watchdog_kick(APP_WATCHDOG_TASK_I2C1_GUARD);
         app_i2c_slave_poll_recovery();
         process_deferred_actions();
         app_i2c_slave_sync_diag_to_ram();
@@ -620,7 +622,10 @@ void StartTaskRxTxI2c1(void const *argument)
     for (;;) {
         uint16_t count = 0U;
         HAL_I2C_StateTypeDef i2c1_state;
-        xQueueReceive(myQueueToMasterHandle, &pckt, osWaitForever);
+        app_watchdog_kick(APP_WATCHDOG_TASK_I2C1_RXTX);
+        if (xQueueReceive(myQueueToMasterHandle, &pckt, pdMS_TO_TICKS(100U)) != pdTRUE) {
+            continue;
+        }
 
         /* Release the TIME-packet coalesce slot as soon as the entry is
          * dequeued so that the next 1Hz tick can re-arm immediately. */

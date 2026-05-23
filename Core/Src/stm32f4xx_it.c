@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "service_gm810_uart.h"
+#include "app_watchdog.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -93,6 +94,7 @@ void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
 
+	app_watchdog_record_fault(APP_WATCHDOG_REASON_HARDFAULT);
 	NVIC_SystemReset();
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
@@ -109,6 +111,8 @@ void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
 
+	app_watchdog_record_fault(APP_WATCHDOG_REASON_MEMMANAGE);
+	NVIC_SystemReset();
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
@@ -124,6 +128,8 @@ void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
 
+	app_watchdog_record_fault(APP_WATCHDOG_REASON_BUSFAULT);
+	NVIC_SystemReset();
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
   {
@@ -139,6 +145,8 @@ void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
 
+	app_watchdog_record_fault(APP_WATCHDOG_REASON_USAGEFAULT);
+	NVIC_SystemReset();
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
   {

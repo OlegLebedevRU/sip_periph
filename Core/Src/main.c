@@ -35,6 +35,7 @@
 #include "service_gm810_uart.h"
 #include "service_pn532_task.h"
 #include "service_tca6408.h"
+#include "app_watchdog.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -96,6 +97,7 @@ osTimerId myTimerBuzzerOffHandle;
 osMutexId i2c2_MutexHandle;
 osSemaphoreId pn532SemaphoreHandle;
 /* USER CODE BEGIN PV */
+static osThreadId myTaskWatchdogHandle;
 /* USER CODE END PV */
 
 /* USER CODE BEGIN TCA6408A_HELPERS */
@@ -251,6 +253,7 @@ int main(void)
 	 * PIN_EVENT_TO_ESP.  Running it here (bare-metal, pre-scheduler)
 	 * avoids both races entirely. */
 	app_i2c_slave_init();
+	app_watchdog_init();
   /* USER CODE END 2 */
 
   /* Create the mutex(es) */
@@ -430,6 +433,11 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_THREADS */
 	/* add threads, ... */
+	app_watchdog_require_task(APP_WATCHDOG_TASK_I2C1_GUARD);
+	app_watchdog_require_task(APP_WATCHDOG_TASK_I2C1_RXTX);
+	osThreadDef(myTaskWatchdog, StartTaskWatchdog, osPriorityRealtime, 0, 128);
+	myTaskWatchdogHandle = osThreadCreate(osThread(myTaskWatchdog), NULL);
+	rtos_require_alloc(myTaskWatchdogHandle);
   /* USER CODE END RTOS_THREADS */
 
   /* Start scheduler */
@@ -976,6 +984,7 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
 	/* User can add his own implementation to report the HAL error return state */
+	app_watchdog_record_fault(APP_WATCHDOG_REASON_ERROR_HANDLER);
 	__disable_irq();
 	NVIC_SystemReset();
 	while (1) {
