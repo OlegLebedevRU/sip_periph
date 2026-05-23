@@ -623,6 +623,8 @@ void StartTaskRxTxI2c1(void const *argument)
         uint16_t count = 0U;
         HAL_I2C_StateTypeDef i2c1_state;
         app_watchdog_kick(APP_WATCHDOG_TASK_I2C1_RXTX);
+        /* Finite wait lets this task prove liveness while still waking
+         * immediately when a packet is queued. */
         if (xQueueReceive(myQueueToMasterHandle, &pckt, pdMS_TO_TICKS(100U)) != pdTRUE) {
             continue;
         }

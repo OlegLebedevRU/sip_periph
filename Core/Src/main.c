@@ -435,7 +435,7 @@ int main(void)
 	/* add threads, ... */
 	app_watchdog_require_task(APP_WATCHDOG_TASK_I2C1_GUARD);
 	app_watchdog_require_task(APP_WATCHDOG_TASK_I2C1_RXTX);
-	osThreadDef(myTaskWatchdog, StartTaskWatchdog, osPriorityRealtime, 0, 128);
+	osThreadDef(myTaskWatchdog, StartTaskWatchdog, osPriorityRealtime, 0, 256);
 	myTaskWatchdogHandle = osThreadCreate(osThread(myTaskWatchdog), NULL);
 	rtos_require_alloc(myTaskWatchdogHandle);
   /* USER CODE END RTOS_THREADS */

@@ -12,9 +12,9 @@
 #define APP_IWDG_SR_RVU            (1UL << 1)
 #define APP_IWDG_READY_TIMEOUT     1000000U
 
-#define APP_WATCHDOG_REFRESH_MS        250U
-#define APP_WATCHDOG_HEARTBEAT_MS      1000U
-#define APP_WATCHDOG_STARTUP_GRACE_MS  3000U
+#define APP_WATCHDOG_REFRESH_MS        250U  /* Supervisor checks 4x per heartbeat window. */
+#define APP_WATCHDOG_HEARTBEAT_MS      1000U /* Required tasks must report within this window. */
+#define APP_WATCHDOG_STARTUP_GRACE_MS  3000U /* Gracefully covers first task scheduling after IWDG start. */
 #define APP_WATCHDOG_RETAINED_MAGIC    0x57444731UL /* WDG1 */
 
 typedef struct {
@@ -28,6 +28,8 @@ typedef struct {
 static volatile uint32_t s_required_mask = 0U;
 static volatile uint32_t s_heartbeat_tick[APP_WATCHDOG_TASK_MAX];
 static volatile uint8_t s_started = 0U;
+/* STM32F411CEUX_FLASH.ld maps .noinit as NOLOAD in SRAM, so this survives
+ * NVIC_SystemReset() and IWDG reset while still being lost on power removal. */
 static volatile app_watchdog_retained_t s_retained __attribute__((section(".noinit")));
 
 static uint8_t iwdg_wait_ready(void)
@@ -63,12 +65,14 @@ void app_watchdog_init(void)
 {
     retained_init_once();
 
+    uint32_t guard = APP_IWDG_READY_TIMEOUT;
     RCC->CSR |= RCC_CSR_LSION;
-    for (uint32_t guard = APP_IWDG_READY_TIMEOUT; ((RCC->CSR & RCC_CSR_LSIRDY) == 0U) && (guard > 0U); guard--) {
-        if (guard == 1U) {
-            app_watchdog_record_fault(APP_WATCHDOG_REASON_ERROR_HANDLER);
-            NVIC_SystemReset();
-        }
+    while (((RCC->CSR & RCC_CSR_LSIRDY) == 0U) && (guard > 0U)) {
+        guard--;
+    }
+    if ((RCC->CSR & RCC_CSR_LSIRDY) == 0U) {
+        app_watchdog_record_fault(APP_WATCHDOG_REASON_ERROR_HANDLER);
+        NVIC_SystemReset();
     }
 
     IWDG->KR = APP_IWDG_KR_ENABLE_WRITE;
@@ -92,6 +96,7 @@ void app_watchdog_init(void)
 void app_watchdog_require_task(app_watchdog_task_id_t id)
 {
     if ((uint32_t)id < (uint32_t)APP_WATCHDOG_TASK_MAX) {
+        s_heartbeat_tick[id] = HAL_GetTick();
         s_required_mask |= (1UL << (uint32_t)id);
     }
 }
@@ -154,14 +159,17 @@ void StartTaskWatchdog(void const *argument)
         osDelay(APP_WATCHDOG_REFRESH_MS);
         now = HAL_GetTick();
 
-        if ((s_started != 0U) && (now != last_tick)) {
-            if ((now - start_tick) < APP_WATCHDOG_STARTUP_GRACE_MS) {
-                iwdg_refresh();
-            } else if (all_required_tasks_fresh(now) != 0U) {
-                iwdg_refresh();
-            } else {
-                app_watchdog_record_fault(APP_WATCHDOG_REASON_SUPERVISOR_TIMEOUT);
-            }
+        if ((s_started == 0U) || (now == last_tick)) {
+            last_tick = now;
+            continue;
+        }
+
+        if ((now - start_tick) < APP_WATCHDOG_STARTUP_GRACE_MS) {
+            iwdg_refresh();
+        } else if (all_required_tasks_fresh(now) != 0U) {
+            iwdg_refresh();
+        } else {
+            app_watchdog_record_fault(APP_WATCHDOG_REASON_SUPERVISOR_TIMEOUT);
         }
 
         last_tick = now;
