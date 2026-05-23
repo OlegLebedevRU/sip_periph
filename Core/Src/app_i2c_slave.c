@@ -35,6 +35,7 @@ extern osTimerId myTimerBuzzerOffHandle;
 #define I2C_SLAVE_PUBLISH_PRE_DELAY_MS   10U
 #define I2C_SLAVE_PUBLISH_POST_DELAY_MS  10U
 #define I2C_SLAVE_OUTBOX_RETRY_DELAY_MS  20U
+#define I2C_SLAVE_RXTX_QUEUE_WAIT_MS     100U
 #define I2C_SLAVE_STUCK_CONFIRM_POLLS    3U
 #define I2C_SLAVE_STUCK_CONFIRM_MS       15U
 
@@ -623,9 +624,9 @@ void StartTaskRxTxI2c1(void const *argument)
         uint16_t count = 0U;
         HAL_I2C_StateTypeDef i2c1_state;
         app_watchdog_kick(APP_WATCHDOG_TASK_I2C1_RXTX);
-        /* Finite wait lets this task prove liveness while still waking
-         * immediately when a packet is queued. */
-        if (xQueueReceive(myQueueToMasterHandle, &pckt, pdMS_TO_TICKS(100U)) != pdTRUE) {
+        /* 100 ms is intentionally 1/10 of the watchdog heartbeat window:
+         * idle queue polling proves liveness without delaying queued packets. */
+        if (xQueueReceive(myQueueToMasterHandle, &pckt, pdMS_TO_TICKS(I2C_SLAVE_RXTX_QUEUE_WAIT_MS)) != pdTRUE) {
             continue;
         }
 

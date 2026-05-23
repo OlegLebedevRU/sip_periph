@@ -14,7 +14,7 @@
 
 #define APP_WATCHDOG_REFRESH_MS        250U  /* Supervisor checks 4x per heartbeat window. */
 #define APP_WATCHDOG_HEARTBEAT_MS      1000U /* Required tasks must report within this window. */
-#define APP_WATCHDOG_STARTUP_GRACE_MS  3000U /* Gracefully covers first task scheduling after IWDG start. */
+#define APP_WATCHDOG_STARTUP_GRACE_MS  3000U /* Covers first task scheduling after IWDG start. */
 #define APP_WATCHDOG_RETAINED_MAGIC    0x57444731UL /* WDG1 */
 
 typedef struct {
@@ -46,6 +46,12 @@ static uint8_t iwdg_wait_ready(void)
 static void iwdg_refresh(void)
 {
     IWDG->KR = APP_IWDG_KR_REFRESH;
+}
+
+static uint32_t tick_elapsed_ms(uint32_t now, uint32_t then)
+{
+    /* Unsigned subtraction is wrap-safe for intervals below 2^31 ms. */
+    return now - then;
 }
 
 static void retained_init_once(void)
@@ -134,7 +140,7 @@ static uint8_t all_required_tasks_fresh(uint32_t now)
     for (uint32_t id = 0U; id < (uint32_t)APP_WATCHDOG_TASK_MAX; id++) {
         if ((required & (1UL << id)) != 0U) {
             uint32_t last = s_heartbeat_tick[id];
-            if ((last == 0U) || ((now - last) > APP_WATCHDOG_HEARTBEAT_MS)) {
+            if (tick_elapsed_ms(now, last) > APP_WATCHDOG_HEARTBEAT_MS) {
                 return 0U;
             }
         }
@@ -159,12 +165,14 @@ void StartTaskWatchdog(void const *argument)
         osDelay(APP_WATCHDOG_REFRESH_MS);
         now = HAL_GetTick();
 
+        /* osDelay(250 ms) should not return at the same HAL tick unless the
+         * HAL timebase is wedged; in that case, stop refreshing IWDG. */
         if ((s_started == 0U) || (now == last_tick)) {
             last_tick = now;
             continue;
         }
 
-        if ((now - start_tick) < APP_WATCHDOG_STARTUP_GRACE_MS) {
+        if (tick_elapsed_ms(now, start_tick) < APP_WATCHDOG_STARTUP_GRACE_MS) {
             iwdg_refresh();
         } else if (all_required_tasks_fresh(now) != 0U) {
             iwdg_refresh();
