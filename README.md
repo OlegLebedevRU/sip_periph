@@ -89,3 +89,10 @@ git push -u origin main
 - Shared STM32CubeIDE project files such as `.project`, `.cproject` and `.ioc` are kept in version control.
 - Local workspace/build output folders are ignored.
 - If you want to publish firmware binaries, prefer GitHub Releases instead of committing files from `Debug/` or `Release/`.
+
+
+## Совместимость с ESP32 и образ c6b7a35
+
+Для этого приложения ESP32 использует профиль с отключённым CONFIG_L4_STM32_IO24_MAILBOX. Запрос 0xA8 обрабатывается как неизвестный регистр и может привести к аппаратному тайм-ауту на мастере.
+
+[Скачать STM32F411CEU-c6b7a35.bin](https://github.com/OlegLebedevRU/sip_periph/releases/download/firmware-c6b7a35/STM32F411CEU-c6b7a35.bin). SHA-256 — `F493F3336810C53928A0D9E63FF4DE0DBD324B565C0209E6C2BF15C85AF25287`.
